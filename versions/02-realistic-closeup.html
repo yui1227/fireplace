@@ -1,0 +1,268 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>壁爐 · 擬真特寫</title>
+<style>
+  html,body{margin:0;height:100%;background:#000;overflow:hidden;font-family:system-ui,-apple-system,"PingFang TC","Noto Sans TC",sans-serif}
+  canvas{position:fixed;inset:0;width:100%;height:100%;display:block}
+  #fx{mix-blend-mode:screen;pointer-events:none}
+  #hint{position:fixed;left:50%;top:5%;transform:translateX(-50%);color:#f3d3b0;font-size:14px;letter-spacing:.08em;
+        background:rgba(20,10,6,.55);padding:9px 16px;border-radius:999px;border:1px solid rgba(255,190,130,.18);
+        pointer-events:none;transition:opacity 1.2s;white-space:nowrap}
+  #ui{position:fixed;right:16px;bottom:16px;display:flex;gap:10px;align-items:center;color:#f3d3b0;font-size:13px;
+      background:rgba(20,10,6,.55);padding:8px 12px;border-radius:12px;border:1px solid rgba(255,190,130,.15);transition:opacity .8s}
+  #ui button{background:none;border:1px solid rgba(255,190,130,.3);color:inherit;border-radius:8px;padding:5px 9px;font:inherit;cursor:pointer}
+  #ui input{accent-color:#e8813a;width:90px}
+  body.idle #ui{opacity:0} body.idle{cursor:none}
+</style>
+</head>
+<body>
+<canvas id="gl"></canvas>
+<canvas id="fx"></canvas>
+<div id="hint">點擊畫面開啟聲音 · 點火堆可以添柴</div>
+<div id="ui">
+  <button id="snd">🔇 聲音</button>
+  <input id="vol" type="range" min="0" max="1" step="0.01" value="0.7" aria-label="音量">
+  <button id="fs" title="全螢幕 (F)">⛶</button>
+</div>
+<script>
+(() => {
+'use strict';
+const cv = document.getElementById('gl'), fx = document.getElementById('fx'), fctx = fx.getContext('2d');
+const rnd = Math.random;
+const P = new Float32Array(512); for (let i=0;i<512;i++) P[i]=rnd();
+const vn = x => { const i=Math.floor(x), f=x-i, u=f*f*(3-2*f); return P[i&511]+(P[(i+1)&511]-P[i&511])*u; };
+
+/* ================= WebGL 場景著色器 ================= */
+const VS = `attribute vec2 p;void main(){gl_Position=vec4(p,0.,1.);}`;
+const FS = `precision highp float;
+uniform vec2 R;uniform float T,I,FL,K,YO;
+float h1(vec2 p){p=fract(p*vec2(123.34,456.21));p+=dot(p,p+45.32);return fract(p.x*p.y);}
+vec2 h2(vec2 p){float n=h1(p);return vec2(n,h1(p+n*17.13+3.1));}
+float noise(vec2 p){vec2 i=floor(p),f=fract(p),u=f*f*(3.-2.*f);
+ return mix(mix(h1(i),h1(i+vec2(1,0)),u.x),mix(h1(i+vec2(0,1)),h1(i+vec2(1,1)),u.x),u.y);}
+float fbm(vec2 p){float v=0.,a=.5;for(int i=0;i<5;i++){v+=a*noise(p);p=p*2.03+vec2(1.7,9.2);a*=.5;}return v;}
+float fbm3(vec2 p){float v=0.,a=.5;for(int i=0;i<3;i++){v+=a*noise(p);p=p*2.03+vec2(1.7,9.2);a*=.5;}return v;}
+// Voronoi：回傳 (邊緣距離, 細胞亂數a, 細胞亂數b)
+vec3 voro(vec2 x){vec2 n=floor(x),f=fract(x);float d1=8.,d2=8.;vec2 id=vec2(0);
+ for(int j=-1;j<=1;j++)for(int i=-1;i<=1;i++){vec2 g=vec2(i,j);vec2 o=h2(n+g)*.8+.1;vec2 r=g+o-f;float d=dot(r,r);
+  if(d<d1){d2=d1;d1=d;id=n+g;}else if(d<d2)d2=d;}
+ return vec3(sqrt(d2)-sqrt(d1),h1(id),h1(id+7.7));}
+vec3 ember(float t){t=clamp(t,0.,2.);return vec3(1.,.16+.42*t,.02+.16*t*t)*t;}
+float glowF(vec2 p){vec2 d=(p-vec2(0.,.38))*vec2(.72,1.05);return exp(-dot(d,d)*1.3);}
+void getLog(int i,out vec2 a,out vec2 b,out float r){
+ if(i==0){a=vec2(-1.2,.32);b=vec2(.22,.8);r=.12;}
+ else if(i==1){a=vec2(1.25,.3);b=vec2(-.12,.84);r=.12;}
+ else if(i==2){a=vec2(-1.4,.17);b=vec2(1.4,.3);r=.13;}
+ else if(i==3){a=vec2(-1.05,-.02);b=vec2(.32,.52);r=.125;}
+ else if(i==4){a=vec2(1.1,-.04);b=vec2(-.06,.57);r=.12;}
+ else{a=vec2(-.5,-.07);b=vec2(1.4,.05);r=.11;}}
+float flameF(vec2 p,vec2 w,float seed,float sx){
+ vec2 q=p*vec2(3.8*sx,1.45);
+ float n=fbm(q+w*1.9+vec2(seed,-T*2.6));
+ float base=.02+.55*exp(-p.x*p.x*1.1);
+ float reach=(.7*I+.5*FL+.22)*(1.+.22*max(0.,K-1.6));
+ float env=1.-smoothstep(.75,1.45,abs(p.x));
+ float f=((n*1.9-.78)-(p.y-base)/reach*.72)*env;
+ return min(f,.55)*smoothstep(-.15,.3,p.y);}
+vec3 flameC(float f,float s){
+ float m=smoothstep(0.,.035,f);
+ float t=clamp(f*2.2,0.,1.15);
+ return vec3(1.,.12+.48*t,.02+.16*t*t)*(.22+1.35*t*t)*m*s;}
+vec4 shadeLog(vec2 p,vec2 a,vec2 b,float r,float seed,float gl,float px){
+ vec2 ba=b-a;float len=length(ba);vec2 dir=ba/len;vec2 nr=vec2(-dir.y,dir.x);
+ vec2 pa=p-a;float al=dot(pa,dir),ac=dot(pa,nr);
+ r*=1.+.09*(noise(vec2(al*5.,seed))-.5)+.04*(noise(vec2(al*19.,seed+3.))-.5);
+ float rr=r*.45;vec2 q=vec2(abs(al-len*.5)-len*.5+rr,abs(ac)-r+rr);
+ float d=length(max(q,0.))+min(max(q.x,q.y),0.)-rr;
+ if(d>px)return vec4(0.);
+ float v=clamp(ac/r,-1.,1.);float nz=sqrt(max(0.,1.-v*v));
+ vec2 sc=vec2(al*.8,asin(v)*r)/(r*.3)+seed*7.;
+ sc+=(vec2(noise(sc*.7),noise(sc*.7+9.))-.5)*.9;
+ vec3 vr=voro(sc);float edge=vr.x;
+ float down=clamp(.5-(nr.y*v)*.7,0.,1.);
+ float tn=noise(vec2(vr.y*50.+T*(.25+.5*vr.z),vr.z*30.));
+ float heat=min(gl,1.)*(.15+.9*down)*(.25+.9*tn)*(.6+.35*I+.3*FL);
+ float crack=1.-smoothstep(0.,.03+.11*heat*heat,edge);
+ float bump=smoothstep(.02,.32,edge);
+ float sh=.3+.7*nz;
+ float grain=.7+.6*noise(sc*vec2(6.,1.5));
+ vec3 col=vec3(.018,.015,.013)*(.3+bump)*sh*grain;
+ col+=vec3(.1,.095,.09)*smoothstep(.85,.98,vr.z)*(1.-down)*bump*sh*.3;
+ col+=vec3(.6,.16,.035)*min(gl,1.)*.07*sh*(.35+.65*bump);
+ float cg=smoothstep(.55,.95,tn)*down*gl;
+ col*=mix(.12,1.,nz);
+ col+=(ember(heat*1.2)*crack*1.5+ember(.45*cg)*(1.-bump*.7)*.35)*mix(.5,1.,nz);
+ return vec4(col,1.-smoothstep(-px,px,d));}
+void main(){
+ vec2 uv=gl_FragCoord.xy/R;float A=R.x/R.y;
+ vec2 p=vec2((uv.x-.5)*A*K,uv.y*K-.28-YO);
+ float px=K/R.y*1.2;
+ vec2 wq=p*vec2(1.6,.85);
+ vec2 w=vec2(fbm3(wq+vec2(0.,-T*1.2)),fbm3(wq+vec2(5.2,-T*1.)));
+ float gl=glowF(p)*(.65+.4*I+.45*FL);
+ vec3 col=vec3(.008,.003,.002)+vec3(.3,.07,.012)*gl*.45;
+ col+=flameC(flameF(p*vec2(.8,.88),w,0.,.75),1.);
+ if(p.y<.14){
+  vec2 ep=p*vec2(17.,23.);ep+=(vec2(noise(ep*.5),noise(ep*.5+5.))-.5)*1.4;
+  vec3 v=voro(ep);float lump=smoothstep(0.,.22,v.x);
+  float ht=(.25+.75*noise(vec2(v.y*40.,T*.3+v.z*9.)))*(1.-smoothstep(.85,1.5,abs(p.x)))*(.6+.35*I)*smoothstep(-.45,-.05,p.y);
+  vec3 e=ember(ht*1.1)*(1.-lump)*1.1+ember(ht*.3)*lump*.25+vec3(.008)*lump;
+  col=mix(col,e,smoothstep(.14,.04,p.y)*.97);}
+ for(int i=0;i<6;i++){
+  if(i==2)col+=flameC(flameF(p,w,3.7,1.),.55);
+  if(i==3)col+=flameC(flameF(p*vec2(1.05,1.),w,5.1,1.5)-.2,.45);
+  vec2 a,b;float r;getLog(i,a,b,r);
+  vec4 s=shadeLog(p,a,b,r,float(i)*3.1+1.,gl,px);
+  col=mix(col,s.rgb,s.a);}
+ col+=flameC(flameF(p*vec2(1.15,1.08),w,7.3,1.8)-.26,.4);
+ col+=vec3(1.,.3,.06)*gl*.07*(I+FL);
+ col*=(1.-.5*dot(uv-.5,uv-.5))*.85;
+ col=(col*(2.51*col+.03))/(col*(2.43*col+.59)+.14);
+ gl_FragColor=vec4(pow(clamp(col,0.,1.),vec3(1./2.2)),1.);
+}`;
+let gl = cv.getContext('webgl',{antialias:false,preserveDrawingBuffer:false});
+let U = {};
+if (gl){
+  const sh=(t,s)=>{const o=gl.createShader(t);gl.shaderSource(o,s);gl.compileShader(o);if(!gl.getShaderParameter(o,gl.COMPILE_STATUS))throw new Error(gl.getShaderInfoLog(o));return o;};
+  const pr=gl.createProgram(); gl.attachShader(pr,sh(gl.VERTEX_SHADER,VS)); gl.attachShader(pr,sh(gl.FRAGMENT_SHADER,FS)); gl.linkProgram(pr); gl.useProgram(pr);
+  const b=gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER,b); gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([-1,-1,1,-1,-1,1,1,1]),gl.STATIC_DRAW);
+  const l=gl.getAttribLocation(pr,'p'); gl.enableVertexAttribArray(l); gl.vertexAttribPointer(l,2,gl.FLOAT,false,0,0);
+  for (const n of ['R','T','I','FL','K','YO']) U[n]=gl.getUniformLocation(pr,n);
+} else {
+  document.getElementById('hint').textContent='這個瀏覽器不支援 WebGL';
+}
+
+/* ================= 依視窗大小配置 ================= */
+let W=0,H=0,dpr=1,K=1.75,YO=0,quality=0.7;
+function layout(){
+  W=innerWidth; H=innerHeight; dpr=Math.min(devicePixelRatio||1,2);
+  const A=W/H; K=Math.max(1.8/A,1.45); YO=Math.max(0,(K-1.45)*0.22);
+  const s=Math.min(dpr,1.5)*quality;
+  cv.width=Math.max(2,Math.round(W*s)); cv.height=Math.max(2,Math.round(H*s));
+  fx.width=Math.round(W*dpr); fx.height=Math.round(H*dpr);
+  if (gl) gl.viewport(0,0,cv.width,cv.height);
+}
+// 場景座標 -> 螢幕座標
+const toScreen=(x,y)=>[ (x/((W/H)*K)+0.5)*W, H-((y+0.28+YO)/K)*H ];
+const toScene=(sx,sy)=>[ (sx/W-0.5)*(W/H)*K, (1-sy/H)*K-0.28-YO ];
+
+/* ================= 即時合成音效 ================= */
+const audio = {
+  ctx:null,on:false,vol:0.7,
+  start(){
+    if (this.ctx){ this.ctx.resume(); this.on=true; this.setVol(); return; }
+    const ctx=this.ctx=new (window.AudioContext||window.webkitAudioContext)(), sr=ctx.sampleRate;
+    this.comp=ctx.createDynamicsCompressor(); this.comp.threshold.value=-14; this.comp.ratio.value=4; this.comp.connect(ctx.destination);
+    this.master=ctx.createGain(); this.master.gain.value=0; this.master.connect(this.comp);
+    const brown=ctx.createBuffer(2,sr*6,sr);
+    for (let c=0;c<2;c++){ const d=brown.getChannelData(c); let l=0; for (let i=0;i<d.length;i++){ l=(l+0.02*(rnd()*2-1))/1.02; d[i]=l*3.5; } }
+    const white=ctx.createBuffer(2,sr*3,sr);
+    for (let c=0;c<2;c++){ const d=white.getChannelData(c); for (let i=0;i<d.length;i++) d[i]=rnd()*2-1; }
+    const loop=b=>{const s=ctx.createBufferSource(); s.buffer=b; s.loop=true; s.start(0,rnd()*b.duration); return s;};
+    this.roarLP=ctx.createBiquadFilter(); this.roarLP.type='lowpass'; this.roarLP.frequency.value=380; this.roarLP.Q.value=0.6;
+    this.roarG=ctx.createGain(); loop(brown).connect(this.roarLP).connect(this.roarG).connect(this.master);
+    this.rumLP=ctx.createBiquadFilter(); this.rumLP.type='lowpass'; this.rumLP.frequency.value=110;
+    this.rumG=ctx.createGain(); loop(brown).connect(this.rumLP).connect(this.rumG).connect(this.master);
+    this.hissHP=ctx.createBiquadFilter(); this.hissHP.type='highpass'; this.hissHP.frequency.value=2500;
+    this.hissG=ctx.createGain(); this.hissG.gain.value=0.01; loop(white).connect(this.hissHP).connect(this.hissG).connect(this.master);
+    this.on=true; this.setVol();
+  },
+  stop(){ if(!this.ctx)return; this.on=false; this.master.gain.setTargetAtTime(0,this.ctx.currentTime,0.15); },
+  setVol(){ if(this.ctx&&this.on) this.master.gain.setTargetAtTime(this.vol,this.ctx.currentTime,0.1); },
+  update(I,fl){ if(!this.on)return; const t=this.ctx.currentTime;
+    this.roarG.gain.setTargetAtTime(0.12+0.3*I*I+0.3*fl,t,0.06);
+    this.roarLP.frequency.setTargetAtTime(260+420*I+600*fl,t,0.06);
+    this.rumG.gain.setTargetAtTime(0.18+0.22*I,t,0.1);
+    this.hissG.gain.setTargetAtTime(0.006+0.012*I+0.03*fl,t,0.08); },
+  crackle(s,delay=0){
+    if(!this.on)return; const ctx=this.ctx, sr=ctx.sampleRate;
+    const n=Math.floor(sr*(0.006+0.06*s)), buf=ctx.createBuffer(1,n,sr), d=buf.getChannelData(0);
+    const clicks=1+Math.floor(rnd()*(1+7*s));
+    for (let k=0;k<clicks;k++){ const st=Math.floor(rnd()*n*0.75), amp=(0.3+rnd()*0.7)*(k?0.6:1), dec=sr*(0.0002+rnd()*0.002), len=Math.min(n-st,Math.floor(dec*7));
+      for (let i=0;i<len;i++) d[st+i]+=(rnd()*2-1)*amp*Math.exp(-i/dec); }
+    const src=ctx.createBufferSource(); src.buffer=buf;
+    const bp=ctx.createBiquadFilter(); bp.type='bandpass'; bp.frequency.value=900+rnd()*4800*(1-0.5*s); bp.Q.value=0.5+rnd()*1.2;
+    const g=ctx.createGain(); g.gain.value=0.25+0.9*s; src.connect(bp).connect(g);
+    if (ctx.createStereoPanner){ const pn=ctx.createStereoPanner(); pn.pan.value=(rnd()*2-1)*0.6; g.connect(pn).connect(this.master); } else g.connect(this.master);
+    src.start(ctx.currentTime+0.004+delay);
+  },
+  pop(){
+    if(!this.on)return; const ctx=this.ctx, sr=ctx.sampleRate;
+    const n=Math.floor(sr*0.12), buf=ctx.createBuffer(1,n,sr), d=buf.getChannelData(0), dec=sr*(0.006+rnd()*0.01);
+    for (let i=0;i<n;i++) d[i]=(rnd()*2-1)*Math.exp(-i/dec);
+    const src=ctx.createBufferSource(); src.buffer=buf;
+    const bp=ctx.createBiquadFilter(); bp.type='bandpass'; bp.frequency.value=280+rnd()*600; bp.Q.value=0.9;
+    const g=ctx.createGain(); g.gain.value=1.6; src.connect(bp).connect(g).connect(this.master); src.start(ctx.currentTime+0.004);
+    for (let k=0;k<6;k++) this.crackle(0.3+rnd()*0.5, 0.02+rnd()*0.35);
+  }
+};
+
+/* ================= 火星（場景座標模擬） ================= */
+const sparks=[];
+function spawn(n,power=1,x0){
+  for (let i=0;i<n;i++) sparks.push({ x:(x0!==undefined?x0:(rnd()-0.5)*1.6)+(rnd()-0.5)*0.2, y:0.25+rnd()*0.5,
+    vx:(rnd()-0.5)*0.5*power, vy:(0.35+rnd()*1.1)*power, life:0, max:0.8+rnd()*2.2, size:0.6+rnd()*1.6, ph:rnd()*6.28 });
+  if (sparks.length>500) sparks.splice(0,sparks.length-500);
+}
+const sprite=(()=>{const c=document.createElement('canvas');c.width=c.height=64;const x=c.getContext('2d');
+  const g=x.createRadialGradient(32,32,0,32,32,32);g.addColorStop(0,'rgba(255,200,110,1)');g.addColorStop(0.3,'rgba(255,110,30,.5)');g.addColorStop(1,'rgba(255,60,10,0)');
+  x.fillStyle=g;x.fillRect(0,0,64,64);return c;})();
+function drawSparks(t,dt){
+  const c=fctx; c.setTransform(dpr,0,0,dpr,0,0); c.clearRect(0,0,W,H); c.globalCompositeOperation='lighter'; c.lineCap='round';
+  const unit=H/K;
+  for (let i=sparks.length-1;i>=0;i--){
+    const s=sparks[i]; s.life+=dt; if(s.life>s.max){sparks.splice(i,1);continue;}
+    s.vy+=0.25*dt; s.vx+=Math.sin(t*5+s.ph)*0.6*dt; s.vx*=0.985; s.x+=s.vx*dt; s.y+=s.vy*dt;
+    const [sx,sy]=toScreen(s.x,s.y), heat=1-s.life/s.max, sz=s.size*Math.max(0.6,unit/450);
+    c.strokeStyle=`rgba(255,${(110+140*heat)|0},${(30+120*heat*heat)|0},${Math.min(1,heat*1.5)})`;
+    c.lineWidth=sz; c.beginPath(); c.moveTo(sx,sy); c.lineTo(sx-s.vx*unit*0.03,sy+s.vy*unit*0.03); c.stroke();
+    c.globalAlpha=heat*0.45; const g=sz*5; c.drawImage(sprite,sx-g,sy-g,g*2,g*2); c.globalAlpha=1;
+  }
+}
+
+/* ================= 主迴圈 ================= */
+let last=performance.now()/1000, flare=0, t0=rnd()*100, slow=0, fast=0;
+function frame(now){
+  const t=now/1000, dt=Math.min(0.05,t-last); last=t;
+  // 自動調整解析度以維持流暢
+  if (dt>0.026){ slow++; fast=0; } else if (dt<0.018){ fast++; slow=0; }
+  if (slow>40 && quality>0.35){ quality=Math.max(0.35,quality-0.1); slow=0; layout(); }
+  if (fast>240 && quality<0.9){ quality=Math.min(0.9,quality+0.1); fast=0; layout(); }
+  flare*=Math.exp(-dt*1.3);
+  const I=0.72+0.17*vn(t*0.5)+0.11*vn(t*2.2+40)+0.15*flare;
+  if (rnd()<(6+6*I)*dt){ const s=rnd()**2.2; audio.crackle(s); if(s>0.25||rnd()<0.3) spawn(1+Math.floor(s*8),0.8+s); }
+  if (rnd()<0.09*dt){ audio.pop(); spawn(20+Math.floor(rnd()*14),1.4); flare=Math.min(1.2,flare+0.35); }
+  if (rnd()<2*dt) spawn(1,0.7);
+  audio.update(I,flare);
+  if (gl){
+    gl.uniform2f(U.R,cv.width,cv.height); gl.uniform1f(U.T,(t+t0)%500); gl.uniform1f(U.I,I); gl.uniform1f(U.FL,flare);
+    gl.uniform1f(U.K,K); gl.uniform1f(U.YO,YO); gl.drawArrays(gl.TRIANGLE_STRIP,0,4);
+  }
+  drawSparks(t,dt);
+  requestAnimationFrame(frame);
+}
+
+/* ================= 互動 ================= */
+const hint=document.getElementById('hint'), sndBtn=document.getElementById('snd'), vol=document.getElementById('vol');
+const setUI=()=>{ sndBtn.textContent=audio.on?'🔊 聲音':'🔇 聲音'; };
+cv.addEventListener('pointerdown', e => {
+  if (!audio.ctx){ audio.start(); setUI(); hint.style.opacity=0; }
+  const [x,y]=toScene(e.clientX,e.clientY);
+  if (Math.abs(x)<1.4 && y>-0.3 && y<1.4){ flare=Math.min(1.3,flare+0.6); audio.pop(); spawn(40,1.6,x); }
+});
+sndBtn.onclick=()=>{ audio.on?audio.stop():audio.start(); setUI(); hint.style.opacity=0; };
+vol.oninput=()=>{ audio.vol=+vol.value; audio.setVol(); };
+const fsT=()=>{ document.fullscreenElement?document.exitFullscreen():document.documentElement.requestFullscreen?.().catch(()=>{}); };
+document.getElementById('fs').onclick=fsT;
+addEventListener('keydown',e=>{ if(e.key==='f'||e.key==='F') fsT(); });
+let idleT; const wake=()=>{ document.body.classList.remove('idle'); clearTimeout(idleT); idleT=setTimeout(()=>document.body.classList.add('idle'),3000); };
+addEventListener('pointermove',wake); addEventListener('pointerdown',wake); wake();
+let rz; addEventListener('resize',()=>{ cancelAnimationFrame(rz); rz=requestAnimationFrame(layout); });
+layout(); requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

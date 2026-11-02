@@ -1,0 +1,652 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>壁爐</title>
+<style>
+  html,body{margin:0;height:100%;background:#060303;overflow:hidden;font-family:system-ui,-apple-system,"PingFang TC","Noto Sans TC",sans-serif}
+  #scene{position:fixed;inset:0;isolation:isolate}
+  canvas{position:absolute;left:0;top:0;display:block}
+  #flame{mix-blend-mode:screen;pointer-events:none}
+  #fg{mix-blend-mode:screen;pointer-events:none}
+  #hint{position:fixed;left:50%;bottom:4.5%;transform:translateX(-50%);color:#f3d3b0;font-size:15px;letter-spacing:.08em;
+        background:rgba(20,10,6,.55);padding:10px 18px;border-radius:999px;border:1px solid rgba(255,190,130,.18);
+        pointer-events:none;transition:opacity 1.2s;white-space:nowrap}
+  #ui{position:fixed;right:16px;bottom:16px;display:flex;gap:10px;align-items:center;color:#f3d3b0;font-size:13px;
+      background:rgba(20,10,6,.55);padding:8px 12px;border-radius:12px;border:1px solid rgba(255,190,130,.15);
+      transition:opacity .8s;backdrop-filter:blur(4px);-webkit-backdrop-filter:blur(4px)}
+  #ui button{background:none;border:1px solid rgba(255,190,130,.3);color:inherit;border-radius:8px;padding:5px 9px;font:inherit;cursor:pointer}
+  #ui button:hover{background:rgba(255,160,90,.12)}
+  #ui input{accent-color:#e8813a;width:90px}
+  @media (max-width:640px){#hint{bottom:auto;top:5%;font-size:13px}}
+  body.idle #ui{opacity:0} body.idle{cursor:none}
+</style>
+</head>
+<body>
+<div id="scene">
+  <canvas id="bg"></canvas>
+  <canvas id="flame"></canvas>
+  <canvas id="fg"></canvas>
+</div>
+<div id="hint">點擊畫面開啟聲音 · 點爐火可以添柴</div>
+<div id="ui">
+  <button id="snd">🔇 聲音</button>
+  <input id="vol" type="range" min="0" max="1" step="0.01" value="0.7" aria-label="音量">
+  <button id="fs" title="全螢幕 (F)">⛶</button>
+</div>
+<script>
+(() => {
+'use strict';
+const bg = document.getElementById('bg'), fg = document.getElementById('fg'), fl = document.getElementById('flame');
+const bctx = bg.getContext('2d'), fctx = fg.getContext('2d');
+let W = 0, H = 0, dpr = 1, L = null;
+
+/* ---------- 小工具 ---------- */
+function mulberry32(a){return function(){a|=0;a=a+0x6D2B79F5|0;let t=Math.imul(a^a>>>15,1|a);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296}}
+const P = new Float32Array(512); { const r = mulberry32(7); for (let i=0;i<512;i++) P[i]=r(); }
+function vn(x){ const i=Math.floor(x), f=x-i, u=f*f*(3-2*f); return P[i&511]+(P[(i+1)&511]-P[i&511])*u; } // 0..1
+const rnd = Math.random;
+
+/* ---------- 版面配置（依視窗大小） ---------- */
+function layout(){
+  W = innerWidth; H = innerHeight; dpr = Math.min(devicePixelRatio||1, 2);
+  for (const c of [bg, fg]) { c.width = Math.round(W*dpr); c.height = Math.round(H*dpr); c.style.width = W+'px'; c.style.height = H+'px'; }
+  const floorY = H*0.86;
+  let FW = Math.min(W*0.8, H*1.05), FH = FW*0.74;
+  const maxFH = floorY - H*0.14;
+  if (FH > maxFH) { FH = maxFH; FW = FH/0.74; }
+  const F = { x:(W-FW)/2, y:floorY-FH, w:FW, h:FH };
+  const ow = FW*0.6, oh = FH*0.72;
+  const O = { x:(W-ow)/2, y:floorY-FH*0.04-oh, w:ow, h:oh };
+  const mantel = { x:F.x-FW*0.07, y:F.y-FH*0.085, w:FW*1.14, h:FH*0.085 };
+  const hearth = { x:F.x-FW*0.05, y:floorY-FH*0.04, w:FW*1.1, h:FH*0.11 };
+  L = { floorY, F, O, mantel, hearth, sc: ow/600, r: ow*0.11 };
+
+  const lr = mulberry32(99);
+  const mkLog = (cx, cy, len, r, rot) => {
+    const cracks = [];
+    const n = 3 + Math.floor(lr()*3);
+    for (let k=0;k<n;k++){
+      const pts=[]; let u=-0.45+lr()*0.3, v=-0.7+lr()*1.2; const steps=4+Math.floor(lr()*5);
+      for (let s=0;s<steps;s++){ pts.push([u,v]); u+=0.05+lr()*0.12; v+=(lr()-0.5)*0.5; v=Math.max(-0.9,Math.min(0.9,v)); if(u>0.48)break; }
+      cracks.push({pts, seed:lr()*100, speed:0.6+lr()*2});
+    }
+    return { cx:O.x+O.w*cx, cy:O.y+O.h*cy, len:O.w*len, r:O.h*r, rot, cracks };
+  };
+  L.logs = [ mkLog(0.5,0.80,0.68,0.068,-0.03), mkLog(0.63,0.79,0.42,0.052,-0.42), mkLog(0.42,0.885,0.56,0.062,0.06) ];
+  L.embers = [];
+  for (let i=0;i<70;i++) L.embers.push({ x:O.x+O.w*(0.16+lr()*0.68), y:O.y+O.h*(0.9+lr()*0.08), s:(6+lr()*16)*L.sc, seed:lr()*100, sp:0.5+lr()*2 });
+
+  sizeGL();
+  drawBG();
+}
+
+function openingPath(c, O, grow=0){
+  const x=O.x-grow, y=O.y-grow, w=O.w+grow*2, h=O.h+grow, r=L.r+grow;
+  c.beginPath(); c.moveTo(x,y+h); c.lineTo(x,y+r); c.arcTo(x,y,x+r,y,r); c.lineTo(x+w-r,y); c.arcTo(x+w,y,x+w,y+r,r); c.lineTo(x+w,y+h); c.closePath();
+}
+
+/* ---------- 靜態背景（每次縮放視窗重繪） ---------- */
+function drawBG(){
+  const c = bctx, {F,O,mantel,hearth,floorY,sc} = L, r = mulberry32(1234);
+  c.setTransform(dpr,0,0,dpr,0,0);
+  // 牆
+  let g = c.createLinearGradient(0,0,0,floorY); g.addColorStop(0,'#120b09'); g.addColorStop(1,'#24160f');
+  c.fillStyle=g; c.fillRect(0,0,W,floorY);
+  const step = Math.max(14, 34*sc);
+  for (let x=(W/2)%step - step; x<W; x+=step){ c.fillStyle='rgba(255,215,170,0.022)'; c.fillRect(x,0,step*0.35,floorY); }
+  // 地板
+  g = c.createLinearGradient(0,floorY,0,H); g.addColorStop(0,'#1d110a'); g.addColorStop(1,'#0c0705');
+  c.fillStyle=g; c.fillRect(0,floorY,W,H-floorY);
+  let y=floorY, gap=6*Math.max(sc,0.5), row=0;
+  while (y<H){ c.fillStyle='rgba(0,0,0,0.45)'; c.fillRect(0,y,W,1);
+    const seamStep = 220*Math.max(sc,0.4); for (let x=(row*97)%seamStep; x<W; x+=seamStep*(0.7+r()*0.6)) c.fillRect(x,y,1.2,gap);
+    y+=gap; gap*=1.28; row++; }
+  // 踢腳板
+  c.fillStyle='#0e0806'; c.fillRect(0,floorY-8*Math.max(sc,.5),W,8*Math.max(sc,.5));
+
+  // 磚造外框
+  c.save(); c.beginPath(); c.rect(F.x,F.y,F.w,F.h); c.clip();
+  c.fillStyle='#2a1f1a'; c.fillRect(F.x,F.y,F.w,F.h);
+  const bh = F.h/13, bw = bh*2.5, m = Math.max(1,bh*0.09);
+  for (let j=0, by=F.y+F.h-bh; by>F.y-bh; by-=bh, j++){
+    for (let bx=F.x-((j%2)?bw/2:0); bx<F.x+F.w; bx+=bw){
+      const l = 12+r()*9, s = 30+r()*16, hue = 8+r()*14;
+      c.fillStyle=`hsl(${hue},${s}%,${l}%)`; c.fillRect(bx+m,by+m,bw-2*m,bh-2*m);
+      c.fillStyle='rgba(255,220,190,0.06)'; c.fillRect(bx+m,by+m,bw-2*m,Math.max(1,bh*0.08));
+      c.fillStyle='rgba(0,0,0,0.25)'; c.fillRect(bx+m,by+bh-m-bh*0.1,bw-2*m,bh*0.1);
+      for (let k=0;k<4;k++){ c.fillStyle=`rgba(0,0,0,${r()*0.25})`; c.fillRect(bx+m+r()*(bw-3*m), by+m+r()*(bh-3*m), 1+r()*2, 1+r()*2); }
+    }
+  }
+  // 煙燻痕跡
+  g = c.createRadialGradient(O.x+O.w/2,O.y,0,O.x+O.w/2,O.y,O.w*0.7);
+  g.addColorStop(0,'rgba(0,0,0,0.65)'); g.addColorStop(1,'rgba(0,0,0,0)');
+  c.fillStyle=g; c.fillRect(F.x,F.y,F.w,F.h);
+  c.restore();
+
+  // 石材爐口框
+  openingPath(c,O,O.w*0.045); c.fillStyle='#3a2e28'; c.fill();
+  openingPath(c,O,O.w*0.045); c.lineWidth=2; c.strokeStyle='rgba(0,0,0,0.5)'; c.stroke();
+  openingPath(c,O,O.w*0.012); c.fillStyle='#1a120e'; c.fill();
+
+  // 爐膛內部
+  c.save(); openingPath(c,O); c.clip();
+  c.fillStyle='#050302'; c.fillRect(O.x,O.y,O.w,O.h);
+  const I = { x:O.x+O.w*0.15, y:O.y+O.h*0.06, w:O.w*0.7, h:O.h*0.78 };
+  // 側牆
+  c.fillStyle='#120a07';
+  c.beginPath(); c.moveTo(O.x,O.y); c.lineTo(I.x,I.y); c.lineTo(I.x,I.y+I.h); c.lineTo(O.x,O.y+O.h); c.fill();
+  c.beginPath(); c.moveTo(O.x+O.w,O.y); c.lineTo(I.x+I.w,I.y); c.lineTo(I.x+I.w,I.y+I.h); c.lineTo(O.x+O.w,O.y+O.h); c.fill();
+  // 後牆耐火磚
+  const fbh = I.h/11, fbw = fbh*2.2;
+  for (let j=0, by=I.y+I.h-fbh; by>I.y-fbh; by-=fbh, j++)
+    for (let bx=I.x-((j%2)?fbw/2:0); bx<I.x+I.w; bx+=fbw){
+      c.fillStyle=`hsl(${14+r()*10},${25+r()*15}%,${9+r()*6}%)`;
+      const x0=Math.max(bx+1,I.x), x1=Math.min(bx+fbw-1,I.x+I.w); if (x1>x0) c.fillRect(x0,by+1,x1-x0,fbh-2);
+    }
+  // 爐底
+  c.fillStyle='#0b0605';
+  c.beginPath(); c.moveTo(I.x,I.y+I.h); c.lineTo(I.x+I.w,I.y+I.h); c.lineTo(O.x+O.w,O.y+O.h); c.lineTo(O.x,O.y+O.h); c.fill();
+  g = c.createLinearGradient(0,O.y,0,O.y+O.h*0.7); g.addColorStop(0,'rgba(0,0,0,0.95)'); g.addColorStop(1,'rgba(0,0,0,0)');
+  c.fillStyle=g; c.fillRect(O.x,O.y,O.w,O.h);
+  // 灰燼
+  for (let i=0;i<260;i++){ const ax=O.x+O.w*(0.1+r()*0.8), ay=O.y+O.h*(0.9+r()*0.1);
+    c.fillStyle=`rgba(${70+r()*60},${60+r()*50},${55+r()*45},${0.15+r()*0.3})`; c.fillRect(ax,ay,1+r()*3*sc+1,1+r()*2); }
+  // 柴架 + 木柴
+  c.fillStyle='#000'; c.fillRect(O.x,O.y,O.w,O.h);
+  if (false) {
+  c.fillStyle='#0a0808';
+  c.fillRect(O.x+O.w*0.16,O.y+O.h*0.925,O.w*0.68,O.h*0.018);
+  for (const fx of [0.22,0.78]){ c.fillRect(O.x+O.w*fx-O.w*0.012,O.y+O.h*0.84,O.w*0.024,O.h*0.16);
+    c.beginPath(); c.arc(O.x+O.w*fx,O.y+O.h*0.84,O.w*0.022,0,Math.PI*2); c.fill(); }
+  }
+  c.restore();
+
+  // 壁爐台
+  c.fillStyle='#000'; c.globalAlpha=0.4; c.fillRect(mantel.x+4,mantel.y+mantel.h,mantel.w-8,mantel.h*0.5); c.globalAlpha=1;
+  g = c.createLinearGradient(0,mantel.y,0,mantel.y+mantel.h); g.addColorStop(0,'#5a3c26'); g.addColorStop(0.25,'#3f2817'); g.addColorStop(1,'#24160c');
+  c.fillStyle=g; c.fillRect(mantel.x,mantel.y,mantel.w,mantel.h);
+  c.fillStyle='rgba(255,210,160,0.12)'; c.fillRect(mantel.x,mantel.y,mantel.w,Math.max(1,mantel.h*0.08));
+  for (let i=0;i<14;i++){ c.strokeStyle=`rgba(0,0,0,${0.1+r()*0.15})`; c.lineWidth=1; const yy=mantel.y+mantel.h*(0.2+r()*0.75);
+    c.beginPath(); c.moveTo(mantel.x,yy); c.bezierCurveTo(mantel.x+mantel.w*0.3,yy+(r()-.5)*4,mantel.x+mantel.w*0.7,yy+(r()-.5)*4,mantel.x+mantel.w,yy); c.stroke(); }
+
+  // 爐床石板
+  g = c.createLinearGradient(0,hearth.y,0,hearth.y+hearth.h); g.addColorStop(0,'#3b302b'); g.addColorStop(0.7,'#2a211d'); g.addColorStop(0.72,'#171110'); g.addColorStop(1,'#110c0a');
+  c.fillStyle=g; c.fillRect(hearth.x,hearth.y,hearth.w,hearth.h);
+  c.fillStyle='rgba(0,0,0,0.35)'; for (let k=1;k<5;k++) c.fillRect(hearth.x+hearth.w*k/5,hearth.y,1.5,hearth.h*0.7);
+
+  // 暗角
+  g = c.createRadialGradient(W/2,O.y+O.h*0.7,Math.min(W,H)*0.25,W/2,O.y+O.h*0.7,Math.max(W,H)*0.85);
+  g.addColorStop(0,'rgba(0,0,0,0)'); g.addColorStop(1,'rgba(0,0,0,0.75)');
+  c.fillStyle=g; c.fillRect(0,0,W,H);
+}
+
+function logXf(c, lg){ c.translate(lg.cx,lg.cy); c.rotate(lg.rot); }
+function drawLog(c, lg, r){
+  c.save(); logXf(c,lg);
+  const hl=lg.len/2, R=lg.r;
+  const g = c.createLinearGradient(0,-R,0,R); g.addColorStop(0,'#0c0705'); g.addColorStop(0.35,'#2a1a10'); g.addColorStop(0.7,'#1c110a'); g.addColorStop(1,'#070403');
+  c.fillStyle=g; c.beginPath(); c.roundRect(-hl,-R,lg.len,2*R,R*0.6); c.fill();
+  for (let i=0;i<10;i++){ const v=(r()*2-1)*R*0.85; c.strokeStyle=`rgba(0,0,0,${0.3+r()*0.4})`; c.lineWidth=1+r()*1.5;
+    c.beginPath(); c.moveTo(-hl+r()*lg.len*0.3,v); c.lineTo(hl-r()*lg.len*0.3,v+(r()-.5)*R*0.3); c.stroke(); }
+  for (let i=0;i<14;i++){ c.fillStyle=`rgba(0,0,0,${0.3+r()*0.5})`; c.beginPath(); c.ellipse(-hl+r()*lg.len,(r()*2-1)*R*0.7,R*(0.2+r()*0.5),R*(0.1+r()*0.25),0,0,Math.PI*2); c.fill(); }
+  // 截面年輪
+  const eg = c.createRadialGradient(hl,0,0,hl,0,R); eg.addColorStop(0,'#6b4c30'); eg.addColorStop(0.6,'#4a321e'); eg.addColorStop(0.85,'#231409'); eg.addColorStop(1,'#0a0503');
+  c.fillStyle=eg; c.beginPath(); c.ellipse(hl,0,R*0.45,R*0.98,0,0,Math.PI*2); c.fill();
+  c.strokeStyle='rgba(20,10,5,0.5)'; c.lineWidth=0.8;
+  for (let k=1;k<5;k++){ c.beginPath(); c.ellipse(hl,0,R*0.45*k/5,R*0.98*k/5,0,0,Math.PI*2); c.stroke(); }
+  c.restore();
+}
+
+/* ---------- WebGL：3D 光線步進壁爐場景 + 體積火焰 + 光暈後製 ---------- */
+let gl = null, U = {}, glQ = 0.75, GLX = null;
+// 鏡頭位置（單位＝爐口寬；x 左負右正，y 從爐底起算的高度，z 負值＝站在爐口前方的距離）
+const CAMERA = [-0.55, 2.4, -2.1];
+const COMMON = `precision highp float;
+float h1(vec2 p){p=fract(p*vec2(123.34,456.21));p+=dot(p,p+45.32);return fract(p.x*p.y);}
+vec2 h2(vec2 p){float n=h1(p);return vec2(n,h1(p+n*17.13+3.1));}
+float noise(vec2 p){vec2 i=floor(p),f=fract(p),u=f*f*(3.-2.*f);
+ return mix(mix(h1(i),h1(i+vec2(1,0)),u.x),mix(h1(i+vec2(0,1)),h1(i+vec2(1,1)),u.x),u.y);}
+vec3 enc(vec3 c){return c/(1.+c);}
+vec3 dec(vec3 c){c=min(c,vec3(.996));return c/(1.-c);}
+`;
+const VS3 = `attribute vec2 p;varying vec2 vUv;void main(){vUv=p*.5+.5;gl_Position=vec4(p,0.,1.);}`;
+
+const SCENE_FS = COMMON + `
+uniform vec2 R;uniform float T,I,FL,HP,RAD;uniform vec4 OP;uniform vec3 CAM;
+float h13(vec3 p){p=fract(p*.3183099+.1);p*=17.;return fract(p.x*p.y*p.z*(p.x+p.y+p.z));}
+float n3(vec3 x){vec3 i=floor(x),f=fract(x);f=f*f*(3.-2.*f);
+ return mix(mix(mix(h13(i),h13(i+vec3(1,0,0)),f.x),mix(h13(i+vec3(0,1,0)),h13(i+vec3(1,1,0)),f.x),f.y),
+            mix(mix(h13(i+vec3(0,0,1)),h13(i+vec3(1,0,1)),f.x),mix(h13(i+vec3(0,1,1)),h13(i+vec3(1,1,1)),f.x),f.y),f.z);}
+float fbm3(vec3 p){float v=0.,a=.5;for(int i=0;i<4;i++){v+=a*n3(p);p=p*2.03+vec3(1.3,7.1,4.7);a*=.5;}return v;}
+vec3 voro(vec2 x){vec2 n=floor(x),f=fract(x);float d1=8.,d2=8.;vec2 id=vec2(0);
+ for(int j=-1;j<=1;j++)for(int i=-1;i<=1;i++){vec2 g=vec2(i,j);vec2 o=h2(n+g)*.8+.1;vec2 r=g+o-f;float d=dot(r,r);
+  if(d<d1){d2=d1;d1=d;id=n+g;}else if(d<d2)d2=d;}
+ return vec3(sqrt(d2)-sqrt(d1),h1(id),h1(id+7.7));}
+vec3 ember(float t){t=clamp(t,0.,2.);return vec3(1.,.15+.42*t,.02+.16*t*t)*t;}
+float openMask(vec2 fc){vec2 q=fc-OP.xy;
+ if(q.x<0.||q.y<0.||q.x>OP.z||q.y>OP.w)return 0.;
+ if(q.y>OP.w-RAD){
+  if(q.x<RAD)return 1.-smoothstep(RAD-1.,RAD+1.,length(q-vec2(RAD,OP.w-RAD)));
+  if(q.x>OP.z-RAD)return 1.-smoothstep(RAD-1.,RAD+1.,length(q-vec2(OP.z-RAD,OP.w-RAD)));}
+ return 1.;}
+void logDef(int i,out vec3 a,out vec3 b,out float r){
+ if(i==0){a=vec3(-.38,.095,.36);b=vec3(.39,.105,.33);r=.09;}
+ else if(i==1){a=vec3(-.36,.08,.1);b=vec3(.34,.075,.13);r=.078;}
+ else if(i==2){a=vec3(-.3,.085,.03);b=vec3(.14,.26,.38);r=.066;}
+ else if(i==3){a=vec3(.31,.082,.04);b=vec3(-.12,.27,.37);r=.064;}
+ else{a=vec3(-.17,.25,.21);b=vec3(.22,.22,.26);r=.052;}}
+float sdCyl(vec3 p,vec3 a,vec3 b,float r){
+ vec3 ba=b-a,pa=p-a;float baba=dot(ba,ba),paba=dot(pa,ba);
+ float x=length(pa*baba-ba*paba)-r*baba,y=abs(paba-baba*.5)-baba*.5;
+ float x2=x*x,y2=y*y*baba;
+ float d=(max(x,y)<0.)?-min(x2,y2):(((x>0.)?x2:0.)+((y>0.)?y2:0.));
+ return sign(d)*sqrt(abs(d))/baba;}
+vec2 map(vec3 p){
+ vec2 res=vec2(1e3,-1.);
+ for(int i=0;i<5;i++){vec3 a,b;float r;logDef(i,a,b,r);
+  float d=sdCyl(p,a,b,r-.01)-.01;
+  if(d<res.x)res=vec2(d,float(i));}
+ res.x-=.003*sin(p.x*70.+p.z*55.)*sin(p.y*60.+p.x*20.);
+ return res;}
+vec3 calcN(vec3 p){const vec2 k=vec2(1,-1);float e=.0015;
+ return normalize(k.xyy*map(p+k.xyy*e).x+k.yyx*map(p+k.yyx*e).x+k.yxy*map(p+k.yxy*e).x+k.xxx*map(p+k.xxx*e).x);}
+vec3 LP(){return vec3(.04*sin(T*1.7)+.02*sin(T*4.1),.3+.03*sin(T*2.3),.25);}
+float LI(){return (1.1+.5*FL)*I*(.9+.2*noise(vec2(T*9.,1.)));}
+float shadow(vec3 p,vec3 l){vec3 d=l-p;float L=length(d);d/=L;float res=1.,t=.015;
+ for(int i=0;i<16;i++){float h=map(p+d*t).x;res=min(res,9.*h/t);t+=clamp(h,.008,.06);if(res<.02||t>L)break;}
+ return clamp(res,0.,1.);}
+vec3 lightAt(vec3 p,vec3 n,float sh){
+ vec3 l=LP()-p;float d2=dot(l,l);l=normalize(l);
+ vec3 c=vec3(1.,.42,.13)*LI()*max(dot(n,l),0.)/(1.+20.*d2)*sh*1.6;
+ vec3 l2=vec3(0.,.03,.25)-p;float e2=dot(l2,l2);
+ c+=vec3(1.,.3,.07)*.55*I*max(dot(n,normalize(l2)),0.)/(1.+45.*e2);
+ return c+vec3(1.,.35,.1)*.015*I;}
+vec3 shadeLog(vec3 p,float fid,vec3 rd){
+ vec3 a,b;float r;int id=int(fid+.5);logDef(id,a,b,r);
+ vec3 n=calcN(p);
+ vec3 ba=b-a;float len=length(ba);vec3 dir=ba/len;
+ float al=dot(p-a,dir);vec3 rel=p-a-dir*al;
+ vec3 u=normalize(cross(dir,vec3(0,1,0)));vec3 v=cross(u,dir);
+ float ang=atan(dot(rel,v),dot(rel,u));float rad=length(rel)/r;
+ vec3 hp=(p-vec3(0.,.16,.24))*vec3(2.6,3.4,4.);float hf=exp(-dot(hp,hp));
+ float down=clamp(.5-.6*n.y,0.,1.);
+ float sh=shadow(p+n*.004,LP());
+ vec3 col;
+ if(al<.008||al>len-.008){
+  // 鋸斷面：年輪＋放射裂紋，外緣燒得最紅
+  vec2 pc=vec2(rad*6.,ang*2.5+fid*5.);vec3 vr=voro(pc);
+  float rings=.5+.5*sin(rad*38.+noise(vec2(ang*3.,rad*8.))*4.);
+  vec3 alb=mix(vec3(.05,.03,.018),vec3(.11,.065,.035),rings)*(1.-.6*smoothstep(.55,1.,rad));
+  col=alb*lightAt(p,n,sh);
+  float rim=smoothstep(.75,1.,rad)*hf;
+  col+=ember(rim*(.6+.6*noise(vec2(ang*4.,T*.5))))*(1.-smoothstep(0.,.06,vr.x))*1.4;
+  col+=ember(rim*.35)*.4;
+ }else{
+  vec2 sc=vec2(al*.75,ang*r)/(r*.55)+fid*7.;
+  sc+=(vec2(noise(sc*.7),noise(sc*.7+9.))-.5)*.9;
+  vec3 vr=voro(sc);float edge=vr.x;
+  float bump=smoothstep(.02,.3,edge);
+  float tn=noise(vec2(vr.y*50.+T*(.25+.5*vr.z),vr.z*30.));
+  float heat=hf*(.25+.95*down)*(.3+.9*tn)*(.65+.35*I+.35*FL);
+  float crack=1.-smoothstep(0.,.03+.12*heat*heat,edge);
+  vec3 alb=vec3(.03,.025,.022)*(.35+.9*bump)*(.75+.5*noise(sc*vec2(5.,1.3)));
+  alb+=vec3(.16,.15,.14)*smoothstep(.82,.97,vr.z)*smoothstep(.1,.6,n.y)*bump;
+  col=alb*lightAt(p,n,sh)*(.5+.5*bump);
+  col+=ember(heat*1.3)*crack*1.6;
+  col+=ember(heat*.45)*smoothstep(.6,.95,tn)*down*(1.-bump*.6)*.6;
+ }
+ return col;}
+vec3 shadeWall(vec3 p,int id){
+ vec3 n;vec2 uv;
+ if(id==0){n=vec3(0,0,-1);uv=p.xy;}
+ else if(id==2){n=normalize(vec3(-1,0,-.32));uv=vec2(p.z,p.y);}
+ else if(id==3){n=normalize(vec3(1,0,-.32));uv=vec2(-p.z,p.y);}
+ else if(id==4){n=normalize(vec3(0,-1,.3));uv=p.xz;}
+ else{n=vec3(0,1,0);uv=p.xz;}
+ float sh=shadow(p+n*.004,LP());
+ if(id==1){
+  vec3 alb=vec3(.085,.08,.075)*(.55+.7*noise(uv*35.))*(.7+.3*noise(uv*180.));
+  vec3 col=alb*lightAt(p,n,sh);
+  vec2 ep=uv*vec2(17.,17.);ep+=(vec2(noise(ep*.5),noise(ep*.5+5.))-.5)*1.3;
+  vec3 v=voro(ep);float lump=smoothstep(0.,.22,v.x);
+  vec2 dq=vec2(p.x/.28,(p.z-.25)/.15);float hx=exp(-dot(dq,dq));
+  float ht=hx*(.35+.8*noise(vec2(v.y*40.,T*.35+v.z*9.)))*(.65+.35*I+.3*FL);
+  float coal=step(.25,hx*(.4+v.z));
+  col=mix(col,vec3(.02,.017,.015)*lightAt(p,n,sh)*(.5+lump)+ember(ht*1.2)*(1.-lump)*1.3+ember(ht*.4)*lump*.3,coal);
+  return col;}
+ vec2 bp=uv*vec2(1./.19,1./.062);float row=floor(bp.y);bp.x+=mod(row,2.)*.5;vec2 f=fract(bp);
+ float groove=smoothstep(0.,.035,f.x)*smoothstep(1.,.965,f.x)*smoothstep(0.,.1,f.y)*smoothstep(1.,.9,f.y);
+ vec3 alb=mix(vec3(.025,.02,.017),vec3(.24,.1,.06)*(.55+.6*h1(floor(bp))),groove)*(.75+.4*noise(uv*90.))*(.85+.3*noise(uv*260.));
+ float soot=smoothstep(.0,.45,p.y)*(.7+.3*smoothstep(.5,.0,abs(p.x)));
+ alb*=mix(1.,.1,soot);
+ if(id==4)alb*=.1;
+ return alb*lightAt(p,n,sh)*(.6+.4*groove);}
+vec4 src(int i){
+ if(i==0)return vec4(-.22,.2,.8,0.);
+ if(i==1)return vec4(-.08,.25,1.,1.7);
+ if(i==2)return vec4(.07,.2,1.1,3.1);
+ if(i==3)return vec4(.22,.24,.85,4.4);
+ return vec4(0.,.3,.95,5.9);}
+vec2 fireAt(vec3 p){
+ float hh=p.y-.1;if(hh<-.06)return vec2(0.);hh=max(hh,0.);
+ vec3 wp=p*vec3(3.5,1.8,3.5)+vec3(0.,-T*1.5,0.);
+ vec2 w=vec2(n3(wp),n3(wp+vec3(7.3,1.1,3.7)))-.5;
+ vec2 xz=p.xz+w*(.05+.4*hh);
+ float s=0.,reach=.1;
+ for(int i=0;i<5;i++){vec4 sr=src(i);
+  float fl=.7+.5*noise(vec2(T*.8+sr.w*3.,sr.w));
+  float hm=sr.z*fl*(.78*I+.45*FL+.17);
+  float wd=.12*max(.04,1.-hh/(hm+.01))+.008;
+  vec2 dd=(xz-sr.xy)*vec2(1.,1.4);float e=exp(-dot(dd,dd)/(wd*wd));
+  if(e>s){s=e;reach=hm;}}
+ if(s<.03||hh>reach*1.3)return vec2(0.);
+ float n=fbm3(p*vec3(10.,4.2,10.)+vec3(w.x,0.,w.y)*2.5+vec3(0.,-T*3.3,0.));
+ float d=s*(n*2.-.4)-hh/max(reach,.04)*.65-smoothstep(reach*.85,reach*1.3,hh)*.5;
+ if(d<=0.)return vec2(0.);
+ return vec2(smoothstep(0.,.12,d),clamp(d*1.5+.05,0.,1.)*(1.2-min(hh*1.7,.9)));}
+void main(){
+ vec2 fc=gl_FragCoord.xy;float m=openMask(fc);
+ if(m<=0.){gl_FragColor=vec4(0.,0.,0.,1.);return;}
+ vec2 q=(fc-OP.xy)/OP.z;
+ vec3 P0=vec3(q.x-.5,q.y,0.);vec3 ro=CAM,rd=normalize(P0-CAM);float t0=length(P0-CAM);
+ float tw=1e5;int wid=0;float tt;
+ tt=(.5-ro.z)/rd.z;if(tt>t0&&tt<tw){tw=tt;wid=0;}
+ if(rd.y<0.){tt=-ro.y/rd.y;if(tt>t0&&tt<tw){tw=tt;wid=1;}}
+ vec3 nr=vec3(1,0,.32);float dn=dot(rd,nr);if(dn>0.){tt=(.5-dot(ro,nr))/dn;if(tt>t0&&tt<tw){tw=tt;wid=2;}}
+ vec3 nl=vec3(-1,0,.32);dn=dot(rd,nl);if(dn>0.){tt=(.5-dot(ro,nl))/dn;if(tt>t0&&tt<tw){tw=tt;wid=3;}}
+ vec3 nc=vec3(0,1,-.3);dn=dot(rd,nc);if(dn>0.){tt=(HP-dot(ro,nc))/dn;if(tt>t0&&tt<tw){tw=tt;wid=4;}}
+ float t=t0,tl=-1.;vec2 hm=vec2(0.);
+ // 先跳到木柴所在高度以下
+ if(rd.y<0.){float ty=(.36-ro.y)/rd.y;t=max(t,ty);}
+ for(int i=0;i<64;i++){if(t>tw)break;hm=map(ro+rd*t);if(hm.x<.0007*t){tl=t;break;}t+=hm.x*.85;}
+ float tEnd=tw;vec3 col;
+ if(tl>0.){tEnd=tl;col=shadeLog(ro+rd*tl,hm.y,rd);}else col=shadeWall(ro+rd*tw,wid);
+ // 體積火焰
+ vec3 bmin=vec3(-.48,.03,.0),bmax=vec3(.48,HP+.2,.5);
+ vec3 i0=(bmin-ro)/rd,i1=(bmax-ro)/rd;vec3 mn=min(i0,i1),mx=max(i0,i1);
+ float tn=max(max(max(mn.x,mn.y),mn.z),t0),tf=min(min(min(mx.x,mx.y),mx.z),tEnd);
+ vec3 e=vec3(0.);float tr=1.;
+ if(tf>tn){float dt=(tf-tn)/34.;float s=tn+dt*h1(fc*.731+fract(T*7.31)*vec2(13.,7.));
+  for(int i=0;i<34;i++){vec2 f=fireAt(ro+rd*s);
+   if(f.x>0.){float k=f.y;vec3 c=vec3(1.,.1+.62*k,.02+.32*k*k)*(.18+3.6*k*k*k);
+    e+=c*f.x*dt*tr*19.;tr*=exp(-f.x*dt*.8);}
+   s+=dt;if(s>tf)break;}}
+ col=col*tr+e;
+ gl_FragColor=vec4(enc(col)*m,1.);
+}`;
+const BRIGHT_FS = COMMON + `varying vec2 vUv;uniform sampler2D S;uniform vec2 TX;uniform float TH;
+void main(){vec3 c=vec3(0.);
+ c+=dec(texture2D(S,vUv+TX*vec2(-1,-1)).rgb);c+=dec(texture2D(S,vUv+TX*vec2(1,-1)).rgb);
+ c+=dec(texture2D(S,vUv+TX*vec2(-1,1)).rgb);c+=dec(texture2D(S,vUv+TX*vec2(1,1)).rgb);
+ c*=.25;c=max(c-TH,0.);gl_FragColor=vec4(enc(c),1.);}`;
+const BLUR_FS = COMMON + `varying vec2 vUv;uniform sampler2D S;uniform vec2 DIR;
+void main(){vec3 c=dec(texture2D(S,vUv).rgb)*.227027;
+ c+=(dec(texture2D(S,vUv+DIR*1.3846).rgb)+dec(texture2D(S,vUv-DIR*1.3846).rgb))*.3162162;
+ c+=(dec(texture2D(S,vUv+DIR*3.2308).rgb)+dec(texture2D(S,vUv-DIR*3.2308).rgb))*.0702703;
+ gl_FragColor=vec4(enc(c),1.);}`;
+const COMP_FS = COMMON + `varying vec2 vUv;uniform sampler2D S,B1,B2;uniform float T;uniform vec2 R;
+void main(){vec3 c=dec(texture2D(S,vUv).rgb);
+ vec3 b=dec(texture2D(B1,vUv).rgb)*.55+dec(texture2D(B2,vUv).rgb)*1.1;
+ c+=b;c*=.95;
+ c=(c*(2.51*c+.03))/(c*(2.43*c+.59)+.14);
+ c=pow(clamp(c,0.,1.),vec3(1./2.2));
+ float g=h1(vUv*R+fract(T*13.7)*vec2(91.,37.))-.5;
+ c+=g*.035*c;
+ gl_FragColor=vec4(c,1.);}`;
+
+function initGL(){
+  gl = fl.getContext('webgl',{premultipliedAlpha:false,antialias:false,alpha:false});
+  if (!gl) return;
+  const sh=(type,src)=>{const s=gl.createShader(type);gl.shaderSource(s,src);gl.compileShader(s);if(!gl.getShaderParameter(s,gl.COMPILE_STATUS))throw new Error(gl.getShaderInfoLog(s));return s;};
+  const mk=(fs,names)=>{const p=gl.createProgram();gl.attachShader(p,sh(gl.VERTEX_SHADER,VS3));gl.attachShader(p,sh(gl.FRAGMENT_SHADER,fs));
+    gl.bindAttribLocation(p,0,'p');gl.linkProgram(p);if(!gl.getProgramParameter(p,gl.LINK_STATUS))throw new Error(gl.getProgramInfoLog(p));
+    const u={};for(const n of names)u[n]=gl.getUniformLocation(p,n);return {p,u};};
+  try{
+    GLX = {
+      scene: mk(SCENE_FS,['R','T','I','FL','HP','RAD','OP','CAM']),
+      bright: mk(BRIGHT_FS,['S','TX','TH']),
+      blur: mk(BLUR_FS,['S','DIR']),
+      comp: mk(COMP_FS,['S','B1','B2','T','R']),
+    };
+  }catch(e){ console.error(e); gl=null; return; }
+  const b=gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER,b); gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([-1,-1,1,-1,-1,1,1,1]),gl.STATIC_DRAW);
+  gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0,2,gl.FLOAT,false,0,0);
+}
+function makeRT(w,h){
+  const t=gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D,t);
+  gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,w,h,0,gl.RGBA,gl.UNSIGNED_BYTE,null);
+  for (const [k,v] of [[gl.TEXTURE_MIN_FILTER,gl.LINEAR],[gl.TEXTURE_MAG_FILTER,gl.LINEAR],[gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE],[gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE]]) gl.texParameteri(gl.TEXTURE_2D,k,v);
+  const f=gl.createFramebuffer(); gl.bindFramebuffer(gl.FRAMEBUFFER,f); gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.TEXTURE_2D,t,0);
+  return {t,f,w,h};
+}
+function freeRT(r){ if(r){ gl.deleteTexture(r.t); gl.deleteFramebuffer(r.f); } }
+function sizeGL(){
+  if (!gl) return;
+  const {O}=L, mx=O.w*0.16, mt=O.h*0.16, mb=O.h*0.14;
+  const cw=O.w+2*mx, ch=O.h+mt+mb;
+  fl.style.left=(O.x-mx)+'px'; fl.style.top=(O.y-mt)+'px'; fl.style.width=cw+'px'; fl.style.height=ch+'px';
+  const s=Math.min(dpr,1.5)*glQ;
+  fl.width=Math.max(4,Math.round(cw*s)); fl.height=Math.max(4,Math.round(ch*s));
+  GLX.op=[mx*s, mb*s, O.w*s, O.h*s]; GLX.rad=L.r*s; GLX.hp=O.h/O.w;
+  for (const k of ['rs','b1a','b1b','b2a','b2b']) freeRT(GLX[k]);
+  const W1=Math.max(2,fl.width>>2), H1=Math.max(2,fl.height>>2);
+  GLX.rs=makeRT(fl.width,fl.height);
+  GLX.b1a=makeRT(W1,H1); GLX.b1b=makeRT(W1,H1);
+  GLX.b2a=makeRT(Math.max(2,W1>>1),Math.max(2,H1>>1)); GLX.b2b=makeRT(Math.max(2,W1>>1),Math.max(2,H1>>1));
+}
+function pass(prog, target, setup){
+  gl.useProgram(prog.p);
+  if (target){ gl.bindFramebuffer(gl.FRAMEBUFFER,target.f); gl.viewport(0,0,target.w,target.h); }
+  else { gl.bindFramebuffer(gl.FRAMEBUFFER,null); gl.viewport(0,0,fl.width,fl.height); }
+  setup(prog.u);
+  gl.drawArrays(gl.TRIANGLE_STRIP,0,4);
+}
+const bindTex=(u,unit,rt)=>{ gl.activeTexture(gl.TEXTURE0+unit); gl.bindTexture(gl.TEXTURE_2D,rt.t); gl.uniform1i(u,unit); };
+function renderGL(t, I, flare){
+  if (!gl || !GLX.rs) return;
+  const X=GLX, tt=t%500;
+  pass(X.scene, X.rs, u=>{ gl.uniform2f(u.R,fl.width,fl.height); gl.uniform1f(u.T,tt); gl.uniform1f(u.I,I); gl.uniform1f(u.FL,flare);
+    gl.uniform1f(u.HP,X.hp); gl.uniform1f(u.RAD,X.rad); gl.uniform4f(u.OP,X.op[0],X.op[1],X.op[2],X.op[3]); gl.uniform3f(u.CAM,CAMERA[0],CAMERA[1],CAMERA[2]); });
+  pass(X.bright, X.b1a, u=>{ bindTex(u.S,0,X.rs); gl.uniform2f(u.TX,1/X.rs.w,1/X.rs.h); gl.uniform1f(u.TH,0.35); });
+  pass(X.blur, X.b1b, u=>{ bindTex(u.S,0,X.b1a); gl.uniform2f(u.DIR,1.4/X.b1a.w,0); });
+  pass(X.blur, X.b1a, u=>{ bindTex(u.S,0,X.b1b); gl.uniform2f(u.DIR,0,1.4/X.b1a.h); });
+  pass(X.bright, X.b2a, u=>{ bindTex(u.S,0,X.b1a); gl.uniform2f(u.TX,0.5/X.b1a.w,0.5/X.b1a.h); gl.uniform1f(u.TH,0.); });
+  pass(X.blur, X.b2b, u=>{ bindTex(u.S,0,X.b2a); gl.uniform2f(u.DIR,2/X.b2a.w,0); });
+  pass(X.blur, X.b2a, u=>{ bindTex(u.S,0,X.b2b); gl.uniform2f(u.DIR,0,2/X.b2a.h); });
+  pass(X.comp, null, u=>{ bindTex(u.S,0,X.rs); bindTex(u.B1,1,X.b1a); bindTex(u.B2,2,X.b2a); gl.uniform1f(u.T,tt); gl.uniform2f(u.R,fl.width,fl.height); });
+}
+
+/* ---------- 即時合成音效 ---------- */
+const audio = {
+  ctx:null, on:false, vol:0.7,
+  start(){
+    if (this.ctx){ this.ctx.resume(); this.on=true; this.setVol(); return; }
+    const ctx = this.ctx = new (window.AudioContext||window.webkitAudioContext)();
+    const sr = ctx.sampleRate;
+    this.comp = ctx.createDynamicsCompressor(); this.comp.threshold.value=-14; this.comp.ratio.value=4; this.comp.connect(ctx.destination);
+    this.master = ctx.createGain(); this.master.gain.value=0; this.master.connect(this.comp);
+    // 棕噪音（低沉的火焰呼嘯）
+    const brown = ctx.createBuffer(2, sr*6, sr);
+    for (let ch=0; ch<2; ch++){ const d=brown.getChannelData(ch); let last=0; for (let i=0;i<d.length;i++){ last=(last+0.02*(rnd()*2-1))/1.02; d[i]=last*3.5; } }
+    const white = ctx.createBuffer(2, sr*3, sr);
+    for (let ch=0; ch<2; ch++){ const d=white.getChannelData(ch); for (let i=0;i<d.length;i++) d[i]=rnd()*2-1; }
+    const loop=(buf)=>{const s=ctx.createBufferSource(); s.buffer=buf; s.loop=true; s.start(0, rnd()*buf.duration); return s;};
+    this.roarLP = ctx.createBiquadFilter(); this.roarLP.type='lowpass'; this.roarLP.frequency.value=380; this.roarLP.Q.value=0.6;
+    this.roarG = ctx.createGain(); this.roarG.gain.value=0.2;
+    loop(brown).connect(this.roarLP).connect(this.roarG).connect(this.master);
+    this.rumLP = ctx.createBiquadFilter(); this.rumLP.type='lowpass'; this.rumLP.frequency.value=110;
+    this.rumG = ctx.createGain(); this.rumG.gain.value=0.25;
+    loop(brown).connect(this.rumLP).connect(this.rumG).connect(this.master);
+    this.hissHP = ctx.createBiquadFilter(); this.hissHP.type='highpass'; this.hissHP.frequency.value=2500;
+    this.hissG = ctx.createGain(); this.hissG.gain.value=0.012;
+    loop(white).connect(this.hissHP).connect(this.hissG).connect(this.master);
+    this.on = true; this.setVol();
+  },
+  stop(){ if (!this.ctx) return; this.on=false; this.master.gain.setTargetAtTime(0,this.ctx.currentTime,0.15); },
+  setVol(){ if (this.ctx && this.on) this.master.gain.setTargetAtTime(this.vol,this.ctx.currentTime,0.1); },
+  update(I, flare){
+    if (!this.on) return; const t=this.ctx.currentTime;
+    this.roarG.gain.setTargetAtTime(0.12+0.28*I*I+0.25*flare, t, 0.06);
+    this.roarLP.frequency.setTargetAtTime(260+420*I+600*flare, t, 0.06);
+    this.rumG.gain.setTargetAtTime(0.18+0.22*I, t, 0.1);
+    this.hissG.gain.setTargetAtTime(0.006+0.012*I+0.03*flare, t, 0.08);
+  },
+  // 單次木柴爆裂：每次都即時產生新的波形
+  crackle(s, delay=0){
+    if (!this.on) return; const ctx=this.ctx, sr=ctx.sampleRate;
+    const n = Math.floor(sr*(0.006+0.06*s)), buf=ctx.createBuffer(1,n,sr), d=buf.getChannelData(0);
+    const clicks = 1+Math.floor(rnd()*(1+7*s));
+    for (let k=0;k<clicks;k++){
+      const st=Math.floor(rnd()*n*0.75), amp=(0.3+rnd()*0.7)*(k===0?1:0.6), dec=sr*(0.0002+rnd()*0.002), len=Math.min(n-st, Math.floor(dec*7));
+      for (let i=0;i<len;i++) d[st+i]+=(rnd()*2-1)*amp*Math.exp(-i/dec);
+    }
+    const src=ctx.createBufferSource(); src.buffer=buf;
+    const bp=ctx.createBiquadFilter(); bp.type='bandpass'; bp.frequency.value=900+rnd()*4800*(1-0.5*s); bp.Q.value=0.5+rnd()*1.2;
+    const g=ctx.createGain(); g.gain.value=0.25+0.9*s;
+    const pan=ctx.createStereoPanner? ctx.createStereoPanner():null;
+    src.connect(bp).connect(g);
+    if (pan){ pan.pan.value=(rnd()*2-1)*0.6; g.connect(pan).connect(this.master); } else g.connect(this.master);
+    src.start(ctx.currentTime+0.004+delay);
+  },
+  pop(){
+    if (!this.on) return; const ctx=this.ctx, sr=ctx.sampleRate;
+    const n=Math.floor(sr*0.12), buf=ctx.createBuffer(1,n,sr), d=buf.getChannelData(0), dec=sr*(0.006+rnd()*0.01);
+    for (let i=0;i<n;i++) d[i]=(rnd()*2-1)*Math.exp(-i/dec);
+    const src=ctx.createBufferSource(); src.buffer=buf;
+    const bp=ctx.createBiquadFilter(); bp.type='bandpass'; bp.frequency.value=280+rnd()*600; bp.Q.value=0.9;
+    const g=ctx.createGain(); g.gain.value=1.6;
+    src.connect(bp).connect(g).connect(this.master); src.start(ctx.currentTime+0.004);
+    for (let k=0;k<6;k++) this.crackle(0.3+rnd()*0.5, 0.02+rnd()*0.35);
+  }
+};
+
+/* ---------- 火星粒子 ---------- */
+const sparks = [];
+function spawnSparks(count, power=1, escape=0){
+  const {O,sc,hearth}=L;
+  for (let i=0;i<count;i++){
+    const esc = rnd()<escape;
+    sparks.push({
+      x:O.x+O.w*(0.3+rnd()*0.36), y:O.y+O.h*(0.38+rnd()*0.16),
+      vx:(rnd()-0.5)*(esc?260:70)*sc*power, vy:-(esc?(120+rnd()*180):(80+rnd()*220))*sc*power,
+      life:0, max:esc?(1.8+rnd()*2):(0.8+rnd()*2.2), size:(1+rnd()*2.2)*Math.max(sc,0.5),
+      ph:rnd()*6.28, esc, landY: hearth.y+hearth.h*(0.05+rnd()*0.6), landed:false
+    });
+  }
+  if (sparks.length>600) sparks.splice(0,sparks.length-600);
+}
+
+const glowSprite = (() => { const c=document.createElement('canvas'); c.width=c.height=64; const x=c.getContext('2d');
+  const g=x.createRadialGradient(32,32,0,32,32,32); g.addColorStop(0,'rgba(255,190,90,1)'); g.addColorStop(0.3,'rgba(255,110,30,0.6)'); g.addColorStop(1,'rgba(255,60,10,0)');
+  x.fillStyle=g; x.fillRect(0,0,64,64); return c; })();
+
+/* ---------- 前景（每格重畫：光暈、炭火、火星） ---------- */
+function drawFG(t, I, flare, dt){
+  const c=fctx, {O,sc,hearth,F}=L;
+  c.setTransform(dpr,0,0,dpr,0,0); c.globalCompositeOperation='source-over'; c.clearRect(0,0,W,H);
+  c.globalCompositeOperation='lighter';
+  const cx=O.x+O.w/2, cy=O.y+O.h*0.75, R=Math.max(W,H)*0.95;
+  // 房間被火光照亮
+  let g=c.createRadialGradient(cx,cy,0,cx,cy,R); const a=0.42*I+0.3*flare;
+  g.addColorStop(0,`rgba(255,140,60,${0.30*a})`); g.addColorStop(0.18,`rgba(240,100,40,${0.16*a})`); g.addColorStop(0.5,`rgba(200,70,25,${0.05*a})`); g.addColorStop(1,'rgba(0,0,0,0)');
+  c.fillStyle=g; c.fillRect(0,0,W,H);
+  // 爐床反光
+  g=c.createRadialGradient(cx,hearth.y,0,cx,hearth.y,F.w*0.6);
+  g.addColorStop(0,`rgba(255,130,50,${0.35*a})`); g.addColorStop(1,'rgba(0,0,0,0)');
+  c.fillStyle=g; c.fillRect(F.x-F.w*0.1,hearth.y,F.w*1.2,H-hearth.y);
+  // 爐膛內光
+  c.save(); openingPath(c,O); c.clip();
+  g=c.createRadialGradient(cx,O.y+O.h*0.85,0,cx,O.y+O.h*0.85,O.w*0.6);
+  g.addColorStop(0,`rgba(255,120,40,${0.08*a})`); g.addColorStop(1,'rgba(0,0,0,0)');
+  c.fillStyle=g; c.fillRect(O.x,O.y,O.w,O.h);
+  if (false) for (const e of L.embers){
+    const k=vn(t*e.sp+e.seed); c.globalAlpha=Math.min(1,(0.15+0.6*k*k)*(0.5+0.4*I));
+    const s=e.s*(0.8+0.4*k); c.drawImage(glowSprite,e.x-s,e.y-s*0.6,s*2,s*1.2);
+  }
+  c.globalAlpha=1;
+  // 木柴上發紅的裂紋
+  c.lineCap='round'; c.lineJoin='round';
+  if (false) for (const lg of L.logs){
+    c.save(); logXf(c,lg);
+    for (const cr of lg.cracks){
+      const k=vn(t*cr.speed+cr.seed), al=(0.2+0.8*k)*(0.55+0.5*I+flare*0.5);
+      c.beginPath(); cr.pts.forEach(([u,v],i)=>{const X=u*lg.len,Y=v*lg.r; i?c.lineTo(X,Y):c.moveTo(X,Y);});
+      c.strokeStyle=`rgba(255,70,15,${0.12*al})`; c.lineWidth=lg.r*0.3; c.stroke();
+      c.strokeStyle=`rgba(255,${120+80*k|0},40,${0.5*al})`; c.lineWidth=Math.max(0.8,lg.r*0.05); c.stroke();
+    }
+    c.restore();
+  }
+  c.restore();
+
+  // 火星
+  for (let i=sparks.length-1;i>=0;i--){
+    const s=sparks[i]; s.life+=dt; if (s.life>s.max){ sparks.splice(i,1); continue; }
+    if (s.esc){
+      if (!s.landed){ s.vy+=420*sc*dt; s.x+=s.vx*dt; s.y+=s.vy*dt; if (s.y>=s.landY && s.vy>0){ s.y=s.landY; s.vy*=-0.25; s.vx*=0.4; if (Math.abs(s.vy)<20*sc) s.landed=true; } }
+    } else {
+      s.vy-=60*sc*dt; s.vx+=Math.sin(t*5+s.ph)*90*sc*dt; s.vx*=0.98; s.x+=s.vx*dt; s.y+=s.vy*dt;
+    }
+    const f=s.life/s.max, heat=1-f;
+    if (!s.esc){ c.save(); openingPath(c,O); c.clip(); }
+    const col=`rgba(255,${(110+140*heat)|0},${(30+120*heat*heat)|0},${Math.min(1,heat*1.4)})`;
+    c.strokeStyle=col; c.lineWidth=s.size; c.beginPath(); c.moveTo(s.x,s.y); c.lineTo(s.x-s.vx*0.025,s.y-s.vy*0.025); c.stroke();
+    c.globalAlpha=heat*0.5; const gs=s.size*5; c.drawImage(glowSprite,s.x-gs,s.y-gs,gs*2,gs*2); c.globalAlpha=1;
+    if (!s.esc) c.restore();
+  }
+
+  // WebGL 不可用時的備用火焰
+  if (!gl){
+    c.save(); openingPath(c,O); c.clip();
+    for (let k=0;k<14;k++){ const fx=O.x+O.w*(0.3+0.4*vn(k*3.1+t*0.5)), fh=O.h*(0.3+0.35*vn(k*7+t*2))*I, fw=O.w*0.08;
+      g=c.createRadialGradient(fx,O.y+O.h*0.8,0,fx,O.y+O.h*0.8-fh*0.4,fh);
+      g.addColorStop(0,'rgba(255,200,90,0.35)'); g.addColorStop(1,'rgba(255,60,10,0)'); c.fillStyle=g;
+      c.beginPath(); c.ellipse(fx,O.y+O.h*0.8-fh*0.4,fw,fh*0.6,0,0,Math.PI*2); c.fill(); }
+    c.restore();
+  }
+}
+
+/* ---------- 主迴圈：畫面與聲音共用同一組火勢訊號 ---------- */
+let last=performance.now()/1000, flare=0, slow=0, fast=0;
+function frame(now){
+  const t=now/1000, dt=Math.min(0.05, t-last); last=t;
+  if (dt>0.026){ slow++; fast=0; } else if (dt<0.018){ fast++; slow=0; }
+  if (slow>40 && glQ>0.35){ glQ=Math.max(0.35,glQ-0.1); slow=0; layout(); }
+  if (fast>240 && glQ<0.9){ glQ=Math.min(0.9,glQ+0.1); fast=0; layout(); }
+  flare*=Math.exp(-dt*1.3);
+  const I = 0.72 + 0.17*vn(t*0.5) + 0.11*vn(t*2.2+40) + 0.15*flare;
+  // 爆裂事件：同時產生聲音和火星
+  if (rnd() < (6+6*I)*dt){ const s=rnd()**2.2; audio.crackle(s); if (s>0.25||rnd()<0.3) spawnSparks(1+Math.floor(s*10), 0.8+s); }
+  if (rnd() < 0.09*dt){ audio.pop(); spawnSparks(18+Math.floor(rnd()*14), 1.3, 0.35); flare=Math.min(1.2, flare+0.35); }
+  if (rnd() < 2*dt) spawnSparks(1, 0.7);
+  audio.update(I, flare);
+  renderGL(t, I, flare);
+  drawFG(t, I, flare, dt);
+  requestAnimationFrame(frame);
+}
+
+/* ---------- 互動 ---------- */
+const hint=document.getElementById('hint'), sndBtn=document.getElementById('snd'), vol=document.getElementById('vol');
+function setSoundUI(){ sndBtn.textContent = audio.on ? '🔊 聲音' : '🔇 聲音'; }
+document.getElementById('scene').addEventListener('pointerdown', e => {
+  if (!audio.on && !audio.ctx){ audio.start(); setSoundUI(); hint.style.opacity=0; }
+  const {O}=L;
+  if (e.clientX>O.x && e.clientX<O.x+O.w && e.clientY>O.y && e.clientY<O.y+O.h){
+    flare=Math.min(1.3, flare+0.6); audio.pop(); spawnSparks(40, 1.5, 0.3);
+  }
+});
+sndBtn.onclick = () => { audio.on ? audio.stop() : audio.start(); setSoundUI(); hint.style.opacity=0; };
+vol.oninput = () => { audio.vol=+vol.value; audio.setVol(); };
+const fsToggle = () => { document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen?.().catch(()=>{}); };
+document.getElementById('fs').onclick = fsToggle;
+addEventListener('keydown', e => { if (e.key==='f'||e.key==='F') fsToggle(); });
+let idleT; const wake=()=>{ document.body.classList.remove('idle'); clearTimeout(idleT); idleT=setTimeout(()=>document.body.classList.add('idle'),3000); };
+addEventListener('pointermove', wake); addEventListener('pointerdown', wake); wake();
+let rz; addEventListener('resize', () => { cancelAnimationFrame(rz); rz=requestAnimationFrame(layout); });
+
+initGL(); layout(); requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

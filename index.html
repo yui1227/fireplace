@@ -1,0 +1,785 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>壁爐</title>
+<style>
+  html,body{margin:0;height:100%;background:#000;overflow:hidden;font-family:system-ui,-apple-system,"PingFang TC","Noto Sans TC",sans-serif}
+  canvas{position:fixed;inset:0;width:100%;height:100%;display:block}
+  #fx{mix-blend-mode:screen;pointer-events:none}
+  #hint{position:fixed;left:50%;top:5%;transform:translateX(-50%);color:#f3d3b0;font-size:14px;letter-spacing:.08em;
+        background:rgba(20,10,6,.55);padding:9px 16px;border-radius:999px;border:1px solid rgba(255,190,130,.18);
+        pointer-events:none;transition:opacity 1.2s;white-space:nowrap}
+  #ui{position:fixed;right:16px;bottom:16px;display:flex;gap:10px;align-items:center;color:#f3d3b0;font-size:13px;
+      background:rgba(20,10,6,.55);padding:8px 12px;border-radius:12px;border:1px solid rgba(255,190,130,.15);transition:opacity .8s}
+  #ui button{background:none;border:1px solid rgba(255,190,130,.3);color:inherit;border-radius:8px;padding:5px 9px;font:inherit;cursor:pointer}
+  #ui{flex-direction:column;align-items:stretch}
+  .bar-main{display:flex;gap:10px;align-items:center;justify-content:flex-end}
+  #ui input[type=range]{accent-color:#e8813a;width:90px}
+  #ui input[type=checkbox]{accent-color:#e8813a;width:18px;height:18px}
+  #panel{display:flex;flex-direction:column;gap:10px;padding:4px 2px 10px;margin-bottom:8px;border-bottom:1px solid rgba(255,190,130,.15);min-width:260px}
+  #panel[hidden]{display:none}
+  #panel .row{display:flex;align-items:center;justify-content:space-between;gap:12px}
+  #panel small{display:block;opacity:.6;font-size:11px}
+  #panel .seg{display:flex;gap:4px} #panel .seg button.on{background:rgba(232,129,58,.35);border-color:#e8813a}
+  #panel select{background:#2a1a12;color:inherit;border:1px solid rgba(255,190,130,.3);border-radius:8px;padding:4px 6px;font:inherit}
+  #panel .bar{flex:1;height:6px;background:rgba(255,255,255,.1);border-radius:3px;overflow:hidden} #panel .bar i{display:block;height:100%;background:linear-gradient(90deg,#b8401a,#f0a040)}
+  #panel .hint{font-size:11px;opacity:.7}
+  body.idle #ui{opacity:0} body.idle{cursor:none}
+</style>
+</head>
+<body>
+<canvas id="gl"></canvas>
+<canvas id="fx"></canvas>
+<div id="ui">
+  <div id="panel" hidden>
+    <div class="row"><span>畫質</span><span class="seg"><button data-q="low">低</button><button data-q="mid">中</button><button data-q="high">高</button></span></div>
+    <label class="row"><span>自然燃燒<small>火會慢慢燒完，需要添柴</small></span><input type="checkbox" id="optBurn"></label>
+    <div class="row" id="fuelRow"><span>柴火</span><span class="bar"><i id="fuelBar"></i></span><button id="addLog">🪵 添柴</button></div>
+    <label class="row"><span>鏡頭晃動</span><input type="checkbox" id="optSway"></label>
+    <label class="row"><span>窗外雨聲</span><input type="checkbox" id="optRain"></label>
+    <div class="row"><span>睡眠計時 <small id="sleepLeft"></small></span><select id="optSleep"><option value="0">關</option><option value="15">15 分</option><option value="30">30 分</option><option value="60">60 分</option><option value="90">90 分</option></select></div>
+    <div class="row hint"><span>拖曳畫面轉動視角，雙擊回正；點爐火添柴</span><button id="resetView">回正</button></div>
+  </div>
+  <div class="bar-main">
+    <button id="snd" title="聲音">🔇</button>
+    <input id="vol" type="range" min="0" max="1" step="0.01" value="0.7" aria-label="音量">
+    <button id="gear" title="設定">⚙</button>
+    <button id="fs" title="全螢幕 (F)">⛶</button>
+  </div>
+</div>
+<script>
+(() => {
+'use strict';
+/* ---------- 全場景 3D 光線步進 ---------- */
+const COMMON = `#version 300 es
+precision highp float;precision highp int;
+float h1(vec2 p){p=fract(p*vec2(123.34,456.21));p+=dot(p,p+45.32);return fract(p.x*p.y);}
+vec2 h2(vec2 p){float n=h1(p);return vec2(n,h1(p+n*17.13+3.1));}
+float noise(vec2 p){vec2 i=floor(p),f=fract(p),u=f*f*(3.-2.*f);
+ return mix(mix(h1(i),h1(i+vec2(1,0)),u.x),mix(h1(i+vec2(0,1)),h1(i+vec2(1,1)),u.x),u.y);}
+vec3 enc(vec3 c){c=clamp(c,0.,6e4);return max(pow(c/(1.+c),vec3(1./2.2))+(h1(gl_FragCoord.xy*.913+fract(c.r*91.7))-.5)/255.,0.);}
+vec3 dec(vec3 c){c=pow(clamp(c,0.,.998),vec3(2.2));return c/(1.-c);}
+`;
+const VS3 = `#version 300 es
+in vec2 p;out vec2 vUv;void main(){vUv=p*.5+.5;gl_Position=vec4(p,0.,1.);}`;
+const SCENE_FS = COMMON + `out vec4 o;
+uniform int ZERO;uniform vec2 R,JIT;uniform float T,I,FL,FT,FUEL,STEPS,MOON,SMK;uniform vec3 CAM,TGT;uniform vec4 NL;
+float gFP=.001;
+float df(float fr){return smoothstep(.45,.12,fr*gFP);}
+#define HP .6
+#define SW .74
+#define SH 1.12
+#define SD .34
+float h13(vec3 p){p=fract(p*.3183099+.1);p*=17.;return fract(p.x*p.y*p.z*(p.x+p.y+p.z));}
+float n3(vec3 x){vec3 i=floor(x),f=fract(x);f=f*f*(3.-2.*f);
+ return mix(mix(mix(h13(i),h13(i+vec3(1,0,0)),f.x),mix(h13(i+vec3(0,1,0)),h13(i+vec3(1,1,0)),f.x),f.y),
+            mix(mix(h13(i+vec3(0,0,1)),h13(i+vec3(1,0,1)),f.x),mix(h13(i+vec3(0,1,1)),h13(i+vec3(1,1,1)),f.x),f.y),f.z);}
+float fbm3(vec3 p){float v=0.,a=.5;for(int i=ZERO;i<4;i++){v+=a*n3(p);p=p*2.03+vec3(1.3,7.1,4.7);a*=.5;}return v;}
+vec3 voro(vec2 x){vec2 n=floor(x),f=fract(x);float d1=8.,d2=8.;vec2 id=vec2(0);
+ for(int j=-1+ZERO;j<=1;j++)for(int i=-1+ZERO;i<=1;i++){vec2 g=vec2(i,j);vec2 o=h2(n+g)*.8+.1;vec2 r=g+o-f;float d=dot(r,r);
+  if(d<d1){d2=d1;d1=d;id=n+g;}else if(d<d2)d2=d;}
+ return vec3(sqrt(d2)-sqrt(d1),h1(id),h1(id+7.7));}
+vec3 ember(float t){t=clamp(t,0.,2.);return vec3(1.,.15+.42*t,.02+.16*t*t)*t;}
+float sdBox(vec3 p,vec3 b){vec3 q=abs(p)-b;return length(max(q,0.))+min(max(q.x,max(q.y,q.z)),0.);}
+void logDef(int i,out vec3 a,out vec3 b,out float r){
+ if(i==0){a=vec3(-.4,.085,.35);b=vec3(.41,.095,.32);r=.08;}
+ else if(i==1){a=vec3(-.37,.072,.1);b=vec3(.35,.068,.13);r=.07;}
+ else if(i==2){a=vec3(-.3,.075,.04);b=vec3(.12,.22,.36);r=.058;}
+ else if(i==3){a=vec3(.31,.072,.05);b=vec3(-.1,.23,.35);r=.056;}
+ else if(i==4){a=vec3(-.17,.215,.2);b=vec3(.21,.19,.25);r=.046;}
+ else{a=vec3(-.3,.3+NL.y,.16);b=vec3(.31,.285+NL.y,.22);r=.058*mix(.65,1.,NL.w);return;}
+ float sh=mix(.6,1.,FUEL);float dy=(1.-FUEL)*r*.45;r*=sh;a.y-=dy;b.y-=dy;}
+float sdCyl(vec3 p,vec3 a,vec3 b,float r){
+ vec3 ba=b-a,pa=p-a;float baba=dot(ba,ba),paba=dot(pa,ba);
+ float x=length(pa*baba-ba*paba)-r*baba,y=abs(paba-baba*.5)-baba*.5;
+ float x2=x*x,y2=y*y*baba;
+ float d=(max(x,y)<0.)?-min(x2,y2):(((x>0.)?x2:0.)+((y>0.)?y2:0.));
+ return sign(d)*sqrt(abs(d))/baba;}
+float cavity(vec3 p){float zc=max(p.z,0.);
+ return max(max(-p.y,p.y-(HP+.25*zc)),max(abs(p.x)-(.5-.3*zc),max(-(p.z+.4),p.z-.46)));}
+// 材質：0-4 木柴, 5 爐體, 6 金屬框, 7 爐床, 8 地板, 9 牆
+#define MY .93
+float sdVC(vec3 p,float r,float h){vec2 d=vec2(length(p.xz)-r,abs(p.y-h*.5)-h*.5);return min(max(d.x,d.y),0.)+length(max(d,0.));}
+// 材質：0-4 木柴, 5 爐體, 6 金屬框, 7 爐床, 8 地板, 9 磚牆, 10 壁爐台, 11 柵欄, 12 地毯, 13 蠟燭, 14 花瓶, 15 備用柴, 16 掛畫
+vec2 map(vec3 p){
+ vec2 res=vec2(p.y+.09,8.);
+ float w=SD-.02-p.z; if(w<res.x)res=vec2(w,9.);
+ float mass=sdBox(p-vec3(0.,1.45,SD*.5-.02),vec3(SW,1.54,SD*.5))-.006;
+ float cav=cavity(p);
+ float sur=max(mass,-cav); if(sur<res.x)res=vec2(sur,5.);
+ float fr=max(sdBox(p-vec3(0.,HP*.5,-.03),vec3(.56,HP*.5+.05,.018))-.004,-cav);
+ if(fr<res.x)res=vec2(fr,6.);
+ float hr=sdBox(p-vec3(0.,-.05,-.12),vec3(SW+.08,.04,.16))-.004; if(hr<res.x)res=vec2(hr,7.);
+ float mt=sdBox(p-vec3(0.,MY,.04),vec3(SW+.1,.03,.14))-.008; if(mt<res.x)res=vec2(mt,10.);
+ float db=sdBox(p-vec3(0.,MY+.3,-.04),vec3(SW,.3,.1));
+ if(db<res.x){
+  vec3 q=p-vec3(.5,MY+.038,.0);
+  float body=(length((q-vec3(0.,.085,0.))/vec3(.068,.09,.068))-1.)*.06;
+  float neck=sdVC(q-vec3(0.,.14,0.),.026,.09);
+  float vs=min(body,neck)-.002; vs=max(vs,-sdVC(q-vec3(0.,.17,0.),.02,.1));
+  if(vs<res.x)res=vec2(vs,14.);
+  float pic=sdBox(p-vec3(0.,MY+.36,-.034),vec3(.34,.21,.012))-.003; if(pic<res.x)res=vec2(pic,16.);
+ }
+ float sb=sdBox(p-vec3(0.,.14,-.18),vec3(.63,.17,.1));
+ if(sb<res.x){
+  // 弧形柵欄：圓心在爐內，半徑 FR
+  const float FR=1.131,FZ=.871,HA=.54;
+  vec2 dd=p.xz-vec2(0.,FZ);float rr=length(dd);float an=atan(dd.x,-dd.y);
+  float sa=an*FR,dr=rr-FR,y=p.y;
+  float lim=abs(an)-HA;
+  float bx=sa-.045*clamp(floor(sa/.045+.5),-13.,13.);
+  float bars=max(length(vec2(bx,dr))-.0055,abs(y-.125)-.135);
+  float r1=max(length(vec2(y-.235,dr))-.01,lim*FR);
+  float r2=max(length(vec2(y-.045,dr))-.008,lim*FR);
+  float ft=max(max(abs(dr)-.03,abs(y+.004)-.006),lim*FR-.01);
+  float fin=max(length(vec3(bx,y-.27,dr))-.012,lim*FR);
+  float scr=min(min(bars,min(r1,r2)),min(ft,fin))*.9;
+  if(scr<res.x)res=vec2(scr,11.);
+ }
+ float rg=sdBox(p-vec3(0.,-.087,-.98),vec3(.9,.004,.46))-.002; if(rg<res.x)res=vec2(rg,12.);
+ float wb=sdBox(p-vec3(1.16,.12,-.12),vec3(.25,.24,.25));
+ if(wb<res.x){
+  for(int i=ZERO;i<6;i++){float fi=float(i);
+   vec2 c=i<3?vec2(1.0+fi*.135,-.025):(i<5?vec2(1.07+(fi-3.)*.135,.095):vec2(1.135,.21));
+   float rr=.062+.006*sin(fi*3.7);
+   float d=sdCyl(p,vec3(c.x,c.y,-.32+.03*sin(fi*2.1)),vec3(c.x,c.y,.06-.03*cos(fi*1.3)),rr-.006)-.006;
+   if(d<res.x)res=vec2(d,15.);}
+ }
+ float fb=sdBox(p-vec3(0.,.17+max(NL.y,0.)*.5,.22),vec3(.5,.22+max(NL.y,0.)*.5,.28));
+ if(fb<res.x){
+  for(int i=ZERO;i<5;i++){vec3 a,b;float r;logDef(i,a,b,r);
+   float d=sdCyl(p,a,b,r-.01)-.01;
+   d-=.003*sin(p.x*70.+p.z*55.)*sin(p.y*60.+p.x*20.);
+   if(d<res.x)res=vec2(d,float(i));}
+  if(NL.x>.5){vec3 a,b;float r;logDef(5,a,b,r);float d=sdCyl(p,a,b,r-.01)-.01;if(d<res.x)res=vec2(d,17.);}}
+ return res;}
+vec3 calcN(vec3 p){vec3 n=vec3(0.);
+ for(int i=ZERO;i<4;i++){vec3 e=.5773*(2.*vec3(float(((i+3)>>1)&1),float((i>>1)&1),float(i&1))-1.);n+=e*map(p+.0012*e).x;}
+ return normalize(n);}
+vec3 LP(){return vec3(.04*sin(T*1.7)+.02*sin(T*4.1),.27+.025*sin(T*2.3),.23);}
+float LI(){return (1.1+.5*FL)*I*(.9+.2*noise(vec2(T*9.,1.)));}
+float shadow(vec3 p,vec3 l){vec3 d=l-p;float L=length(d);d/=L;float res=1.,t=.015;
+ for(int i=ZERO;i<20;i++){float h=map(p+d*t).x;res=min(res,9.*h/t);t+=clamp(h,.008,.08);if(res<.02||t>L)break;}
+ return clamp(res,0.,1.);}
+// 爐膛內照明
+vec3 lightIn(vec3 p,vec3 n,float sh){
+ vec3 l=LP()-p;float d2=dot(l,l);l=normalize(l);
+ vec3 c=vec3(1.,.42,.13)*LI()*max(dot(n,l),0.)/(1.+20.*d2)*sh*1.6;
+ vec3 l2=vec3(0.,.03,.23)-p;float e2=dot(l2,l2);
+ c+=vec3(1.,.3,.07)*.55*I*max(dot(n,normalize(l2)),0.)/(1.+45.*e2);
+ return c+vec3(1.,.35,.1)*.015*I;}
+// 房間照明：火光從爐口往外打
+float shadowL(vec3 p,vec3 l,float k){vec3 d=l-p;float L=length(d);d/=L;float res=1.,t=.02;
+ for(int i=ZERO;i<18;i++){float h=map(p+d*t).x;res=min(res,k*h/t);t+=clamp(h,.02,.3);if(res<.02||t>L-.05)break;}
+ return clamp(res,0.,1.);}
+vec3 lightRoom(vec3 p,vec3 n,vec3 rd,float gloss){
+ vec3 o=vec3(.02*sin(T*1.7),.26,-.05);vec3 lo=o-p;float d2=dot(lo,lo);float dl=sqrt(d2);vec3 ld=lo/dl;
+ float emit=clamp(-(p.z-o.z)/dl*1.3,0.,1.);
+ float fl=LI();
+ float fs=1.;if(p.z<-.06&&emit>0.&&d2<3.)fs=shadowL(p+n*.003,o,14.);
+ vec3 c=vec3(1.,.43,.15)*fl*.55*max(dot(n,ld),0.)*emit/(1.+1.2*d2)*fs;
+ vec3 hv=normalize(ld-rd);c+=vec3(1.,.5,.2)*fl*gloss*pow(max(dot(n,hv),0.),40.)*emit/(1.+1.2*d2)*fs;
+ vec3 bo=vec3(0.,.4,-.6)-p;float bd=dot(bo,bo);
+ c+=vec3(1.,.5,.25)*fl*.05*(.55+.45*max(dot(n,normalize(bo)),0.))/(1.+.35*bd);
+ c+=vec3(.013,.013,.016)*(.6+.4*n.y);
+ if(MOON>0.){
+  vec3 ML=normalize(vec3(-.84,.52,-.12));
+  float nm=max(dot(n,ML),0.);
+  if(nm>0.){float tw=(-2.4-p.x)/ML.x;vec2 w=vec2(p.z+ML.z*tw,p.y+ML.y*tw);
+   vec2 wc=w-vec2(-1.27,1.5);
+   float m=smoothstep(.04,0.,max(abs(wc.x)-.4,abs(wc.y)-.55));
+   m*=smoothstep(.012,.03,abs(wc.x))*smoothstep(.012,.03,abs(wc.y))*smoothstep(.01,.025,abs(wc.y-.28))*smoothstep(.01,.025,abs(wc.y+.28));
+   if(m>0.)m*=shadowL(p+n*.003,p+ML*2.5,16.);
+   c+=vec3(.42,.56,.95)*MOON*.16*m*(nm+gloss*.8*pow(max(dot(n,normalize(ML-rd)),0.),40.));}
+  c+=vec3(.006,.009,.018)*MOON*(.5+.5*n.y);}
+ return c;}
+vec3 bricks(vec2 uv,float s){
+ vec2 bp=uv*vec2(1./.21,1./.068);float row=floor(bp.y);bp.x+=mod(row,2.)*.5;vec2 f=fract(bp);
+ float ex=max(.035,1.2*gFP/.21),ey=max(.1,1.2*gFP/.068);
+ float g=smoothstep(0.,ex,f.x)*smoothstep(1.,1.-ex,f.x)*smoothstep(0.,ey,f.y)*smoothstep(1.,1.-ey,f.y);
+ g=mix(g,.85,smoothstep(.4,1.,gFP/.068*4.));
+ vec3 b=vec3(.36,.12,.065)*(.6+.55*h1(floor(bp)))*s;
+ return mix(vec3(.05,.042,.036),b,g)*(1.+(.2*noise(uv*70.)-.1)*df(70.))*(1.+(.24*noise(uv*300.)-.12)*df(300.));}
+void matLog(vec3 p,float fid,vec3 n,out vec3 A,out vec3 E){
+ vec3 a,b;float r;int id=int(fid+.5);logDef(id,a,b,r);
+ float ch=id==5?NL.z:1.;
+ vec3 ba=b-a;float len=length(ba);vec3 dir=ba/len;
+ float al=dot(p-a,dir);vec3 rel=p-a-dir*al;
+ vec3 u=normalize(cross(dir,vec3(0,1,0)));vec3 v=cross(u,dir);
+ float ang=atan(dot(rel,v),dot(rel,u));float rad=length(rel)/r;
+ vec3 hp=(p-vec3(0.,.15,.22))*vec3(2.6,3.6,4.);float hf=exp(-dot(hp,hp));
+ float down=clamp(.5-.6*n.y,0.,1.);
+ A=vec3(0.);E=vec3(0.);
+ if(al<.008||al>len-.008){
+  vec3 vr=voro(vec2(rad*6.,ang*2.5+fid*5.));
+  float rings=.5+.5*sin(rad*38.+noise(vec2(ang*3.,rad*8.))*4.);
+  vec3 alb=mix(vec3(.05,.03,.018),vec3(.11,.065,.035),rings)*(1.-.6*smoothstep(.55,1.,rad));
+  if(ch<.6)alb=mix(vec3(.33,.24,.14)*(.8+.2*rings),alb,ch/.6);
+  A=alb;
+  float rim=smoothstep(.75,1.,rad)*hf*ch;
+  E=ember(rim*(.6+.6*noise(vec2(ang*4.,T*.5))))*(1.-smoothstep(0.,.06,vr.x))*1.4+ember(rim*.35)*.4;
+ }else{
+  vec2 sc=vec2(al*.75,ang*r)/(r*.55)+fid*7.;
+  sc+=(vec2(noise(sc*.7),noise(sc*.7+9.))-.5)*.9;
+  vec3 vr=voro(sc);float edge=vr.x;
+  float bump=smoothstep(.02,.3,edge);
+  float tn=noise(vec2(vr.y*50.+T*(.25+.5*vr.z),vr.z*30.));
+  float heat=hf*(.25+.95*down)*(.3+.9*tn)*(.65+.35*I+.35*FL)*ch*mix(.55,1.,FUEL);
+  float crack=1.-smoothstep(0.,.03+.12*heat*heat,edge);
+  vec3 alb=vec3(.03,.025,.022)*(.35+.9*bump)*(.75+.5*noise(sc*vec2(5.,1.3)));
+  alb+=vec3(.16,.15,.14)*smoothstep(.82-.35*(1.-FUEL),.97,vr.z)*smoothstep(.1,.6,n.y)*bump;
+  vec3 bark=vec3(.16,.1,.06)*(.55+.6*noise(vec2(al*30.,ang*6.)))*(.7+.5*noise(vec2(al*4.,ang*20.)));
+  alb=mix(bark,alb,smoothstep(0.,.6,ch));
+  A=alb*(.5+.5*bump);
+  E=ember(heat*1.3)*crack*1.6+ember(heat*.45)*smoothstep(.6,.95,tn)*down*(1.-bump*.6)*.6;
+ }}
+void matInterior(vec3 p,vec3 n,out vec3 A,out vec3 E){
+ E=vec3(0.);
+ if(n.y>.7){
+  vec2 uv=p.xz;
+  vec3 alb=vec3(.085,.08,.075)*(.55+.7*noise(uv*35.))*(.7+.3*mix(.5,noise(uv*180.),df(180.)));
+  vec2 ep=uv*17.;ep+=(vec2(noise(ep*.5),noise(ep*.5+5.))-.5)*1.3;
+  vec3 v=voro(ep);float lump=smoothstep(0.,.22,v.x);
+  vec2 dq=vec2(p.x/.3,(p.z-.23)/.15);float hx=exp(-dot(dq,dq));
+  float ht=hx*(.35+.8*noise(vec2(v.y*40.,T*.35+v.z*9.)))*(.65+.35*I+.3*FL);
+  float coal=step(.25,hx*(.4+v.z));
+  A=mix(alb,vec3(.02,.017,.015)*(.5+lump),coal);E=coal*(ember(ht*1.2)*(1.-lump)*1.3+ember(ht*.4)*lump*.3);return;}
+ vec2 uv=abs(n.z)>.6?p.xy:vec2(p.z*sign(p.x),p.y);
+ vec3 alb=bricks(uv,.7);
+ float soot=smoothstep(.0,.42,p.y)*(.7+.3*smoothstep(.5,.0,abs(p.x)));
+ alb*=mix(1.,.1,soot);if(n.y<-.4)alb*=.1;
+ A=alb;}
+void matExt(vec3 p,vec3 n,float m,out vec3 A,out vec3 E,out float G){
+ E=vec3(0.);
+ if(m>15.5){ // 掛畫
+  vec2 q=(p.xy-vec2(0.,MY+.36))/vec2(.34,.21);
+  float fr=step(.86,max(abs(q.x),abs(q.y)*1.08));
+  if(fr>.5||n.z>-.5){vec3 alb=vec3(.22,.14,.06)*(.7+.4*noise(q*vec2(40.,3.)));{A=alb;G=.5;return;}}
+  vec2 u=q*.5+.5;
+  vec3 sky=mix(vec3(.55,.35,.25),vec3(.12,.16,.28),u.y);
+  float hill=.45+.12*sin(u.x*5.+1.)+.05*sin(u.x*13.);float hill2=.3+.08*sin(u.x*4.+3.);
+  vec3 alb=sky;
+  alb=mix(alb,vec3(.15,.2,.14),step(u.y,hill));
+  alb=mix(alb,vec3(.08,.12,.08),step(u.y,hill2));
+  alb+=vec3(.6,.45,.2)*exp(-dot(u-vec2(.7,.62),u-vec2(.7,.62))*400.);
+  alb*=.8+.25*mix(.5,noise(u*vec2(120.,60.)),df(180.));
+  {A=alb;G=.1;return;}}
+ if(m>14.5){ // 備用柴
+  if(abs(n.z)>.75){float rr=fract(length(p.xy-vec2(floor((p.x-.93)/.135)*.135+1.,0.))*90.);
+   vec3 alb=vec3(.4,.28,.16)*(.75+.25*rr);{A=alb;G=0.;return;}}
+  vec3 alb=vec3(.14,.07,.032)*(.55+.6*noise(vec2(p.z*6.,atan(p.y,p.x)*40.+p.x*30.)))*(.7+.4*mix(.5,noise(p.xy*90.),df(90.)));
+  {A=alb;G=.05;return;}}
+ if(m>13.5){A=vec3(.04,.12,.13)*(.9+.1*noise(p.xy*50.));G=1.5;return;}
+ if(m>11.5){ // 地毯
+  vec2 q=vec2(p.x/.9,(p.z+.98)/.46);
+  float b=max(abs(q.x),abs(q.y));
+  vec3 alb=vec3(.32,.06,.05);
+  if(b>.9)alb=vec3(.1,.08,.12);
+  else if(b>.82)alb=vec3(.55,.45,.3);
+  else{vec2 g=fract(q*vec2(4.,2.))-.5;float dm=abs(g.x)+abs(g.y);
+   alb=mix(alb,vec3(.55,.45,.3),smoothstep(.36,.33,dm)*smoothstep(.27,.3,dm));
+   alb=mix(alb,vec3(.08,.1,.18),smoothstep(.15,.12,dm));}
+  alb*=.75+.35*mix(.5,noise(p.xz*400.),df(400.));
+  {A=alb;G=0.;return;}}
+ if(m>10.5){vec3 alb=vec3(.025,.024,.023);{A=alb;G=2.5;return;}} // 鐵柵欄
+ if(m>9.5){ // 木壁爐台
+  vec3 alb=vec3(.2,.1,.05)*(.65+.45*mix(.5,noise(vec2(p.x*3.,(p.y+p.z)*160.)),df(160.)))*(.85+.2*noise(p.xz*50.));
+  {A=alb;G=.4;return;}}
+ if(m>8.5){ // 磚牆
+  vec3 alb=bricks(p.xy+vec2(.07,0.),.85);
+  {A=alb;G=.03;return;}}
+ if(m>7.5){ // 木地板
+  vec2 uv=vec2(p.x,p.z);float pl=floor(uv.y/.13);float off=h1(vec2(pl,3.))*3.;
+  float seamZ=smoothstep(0.,.006,fract(uv.y/.13)*.13)*smoothstep(.13,.124,fract(uv.y/.13)*.13);
+  float seg=floor((uv.x+off)/1.1);float seamX=smoothstep(0.,.004,fract((uv.x+off)/1.1)*1.1);
+  float grain=noise(vec2(uv.x*3.+off,uv.y*80.))*.5*df(80.)+.25*(1.-df(80.))+mix(.25,noise(vec2(uv.x*20.,uv.y*300.))*.5,df(300.));
+  vec3 alb=vec3(.26,.14,.07)*(.6+.6*h1(vec2(pl,seg)))*(.75+.45*grain)*seamZ*seamX;
+  {A=alb;G=.35;return;}}
+ if(m>6.5){ // 石板爐床
+  float sl=floor((p.x+1.)/.4);float seam=smoothstep(0.,.005,fract((p.x+1.)/.4)*.4);
+  vec3 alb=vec3(.27,.25,.23)*(.75+.35*h1(vec2(sl,1.)))*(.8+.3*noise(p.xz*40.))*mix(1.,seam,step(.5,n.y));
+  {A=alb;G=.15;return;}}
+ if(m>5.5){ // 金屬爐框
+  vec3 alb=vec3(.16,.155,.15)*(.85+.15*mix(.5,noise(p.xy*vec2(200.,8.)),df(200.)));
+  float inner=smoothstep(.06,0.,max(abs(p.x)-.5,max(p.y-HP,0.)));
+  A=alb;G=1.2;E=vec3(1.,.4,.12)*inner*.08*I;return;}
+ vec2 uv=abs(n.z)>.6?p.xy:(abs(n.x)>.6?vec2(p.z,p.y):p.xz);
+ vec3 alb=bricks(uv+vec2(.3,.0),1.);
+ vec2 sq=vec2(p.x/.45,(p.y-HP-.12)/.15);alb*=1.-.55*exp(-dot(sq,sq))*step(.6,abs(n.z));
+ {A=alb;G=.05;return;}}
+vec4 src(int i){
+ if(i==0)return vec4(-.22,.2,.8,0.);
+ if(i==1)return vec4(-.08,.25,1.,1.7);
+ if(i==2)return vec4(.07,.2,1.1,3.1);
+ if(i==3)return vec4(.22,.24,.85,4.4);
+ return vec4(0.,.3,.95,5.9);}
+vec2 fireAt(vec3 p){
+ float hh=p.y-.1;if(hh<-.06)return vec2(0.);hh=max(hh,0.);
+ vec3 wp=p*vec3(3.5,1.8,3.5)+vec3(0.,-T*1.5,0.);
+ vec2 w=vec2(n3(wp),n3(wp+vec3(7.3,1.1,3.7)))-.5;
+ vec2 xz=p.xz+w*(.05+.4*hh);
+ float s=0.,reach=.1;
+ for(int i=ZERO;i<5;i++){vec4 sr=src(i);
+  float fl=.7+.5*noise(vec2(T*.8+sr.w*3.,sr.w));
+  float hm=sr.z*fl*(.62*I+.38*FL+.14);
+  float wd=.12*max(.04,1.-hh/(hm+.01))+.008;
+  vec2 dd=(xz-sr.xy)*vec2(1.,1.4);float e=exp(-dot(dd,dd)/(wd*wd));
+  if(e>s){s=e;reach=hm;}}
+ if(s<.03||hh>reach*1.3)return vec2(0.);
+ float n=fbm3(p*vec3(10.,4.2,10.)+vec3(w.x,0.,w.y)*2.5+vec3(0.,-T*3.3,0.));
+ float d=s*(n*2.-.4)-hh/max(reach,.04)*.65-smoothstep(reach*.85,reach*1.3,hh)*.5;
+ if(d<=0.)return vec2(0.);
+ return vec2(smoothstep(0.,.12,d),clamp(d*1.5+.05,0.,1.)*(1.2-min(hh*1.7,.9)));}
+void main(){
+ vec2 fc=gl_FragCoord.xy;vec2 uv=((fc+JIT)/R)*2.-1.;
+ vec3 f=normalize(TGT-CAM);vec3 rr=normalize(cross(vec3(0,1,0),f));vec3 uu=cross(f,rr);
+ vec3 ro=CAM,rd=normalize(f+uv.x*FT*(R.x/R.y)*rr+uv.y*FT*uu);
+ float t=.05,tl=-1.;vec2 hm=vec2(0.);
+ for(int i=ZERO;i<128;i++){vec3 p=ro+rd*t;hm=map(p);if(abs(hm.x)<.0005*t){tl=t;break;}t+=hm.x*.85;if(t>14.)break;}
+ vec3 col=vec3(0.);float tEnd=14.;
+ if(tl>0.){tEnd=tl;vec3 p=ro+rd*tl;vec3 n=calcN(p);
+  gFP=tl*FT*2./R.y/max(abs(dot(n,rd)),.25);
+  vec3 A,E;float G=0.;bool inside=false;
+  if(hm.y<4.5){matLog(p,hm.y,n,A,E);inside=true;}
+  else if(hm.y>16.5){matLog(p,5.,n,A,E);inside=true;}
+  else if(hm.y<5.5&&p.z>.004&&abs(p.x)<.505&&p.y<HP+.14){matInterior(p,n,A,E);inside=true;}
+  else matExt(p,n,hm.y,A,E,G);
+  if(inside)col=A*lightIn(p,n,shadow(p+n*.004,LP()))+E;
+  else col=A*lightRoom(p,n,rd,G)+E;}
+ vec3 bmin=vec3(-.48,.03,.0),bmax=vec3(.48,HP+.3,.46);
+ vec3 i0=(bmin-ro)/rd,i1=(bmax-ro)/rd;vec3 mn=min(i0,i1),mx=max(i0,i1);
+ float tn=max(max(mn.x,mn.y),mn.z),tf=min(min(min(mx.x,mx.y),mx.z),tEnd);
+ vec3 e=vec3(0.);float tr=1.;
+ if(tf>tn&&tf>0.){tn=max(tn,0.);float dt=(tf-tn)/STEPS;float s=tn+dt*h1(fc*.731+fract(T*7.31)*vec2(13.,7.));
+  int NS=int(STEPS);
+  for(int i=ZERO;i<NS;i++){vec3 pp=ro+rd*s;vec2 q=fireAt(pp);
+   if(q.x>0.){float k=q.y;vec3 c=vec3(1.,.1+.62*k,.02+.32*k*k)*(.18+3.6*k*k*k);
+    e+=c*q.x*dt*tr*19.;tr*=exp(-q.x*dt*.8);}
+   else if(SMK>0.&&pp.y>.22&&pp.z>.04){
+    vec3 sp=pp*vec3(6.,2.6,6.)+vec3(0.,-T*.55,T*.05);
+    float sw=n3(sp*.5+vec3(0.,0.,T*.1));
+    float sd=n3(sp+vec3(sw*2.,0.,0.))*.65+n3(sp*2.3)*.35;
+    float env=exp(-pp.x*pp.x/(.04+.25*(pp.y-.22)))*smoothstep(.22,.38,pp.y);
+    float dn=max(sd-.5,0.)*env*SMK*(.4+.6*I)*2.2;
+    if(dn>0.){vec3 sc=vec3(.32,.17,.09)*I*exp(-(pp.y-.25)*4.)+vec3(.012,.011,.011);
+     e+=sc*dn*dt*tr*18.;tr*=exp(-dn*dt*16.);}}
+   s+=dt;if(s>tf)break;}}
+ col=col*tr+e;
+ col=max(col,0.);if(any(isnan(col))||any(isinf(col)))col=vec3(0.);
+ o=vec4(enc(col),1.);
+}`;
+const BRIGHT_FS = COMMON + `in vec2 vUv;out vec4 o;uniform sampler2D S;uniform vec2 TX;uniform float TH;
+void main(){vec3 c=vec3(0.);
+ c+=dec(texture(S,vUv+TX*vec2(-1,-1)).rgb);c+=dec(texture(S,vUv+TX*vec2(1,-1)).rgb);
+ c+=dec(texture(S,vUv+TX*vec2(-1,1)).rgb);c+=dec(texture(S,vUv+TX*vec2(1,1)).rgb);
+ c*=.25;c=max(c-TH,0.);o=vec4(enc(c),1.);}`;
+const BLUR_FS = COMMON + `in vec2 vUv;out vec4 o;uniform sampler2D S;uniform vec2 DIR;
+void main(){vec3 c=dec(texture(S,vUv).rgb)*.227027;
+ c+=(dec(texture(S,vUv+DIR*1.3846).rgb)+dec(texture(S,vUv-DIR*1.3846).rgb))*.3162162;
+ c+=(dec(texture(S,vUv+DIR*3.2308).rgb)+dec(texture(S,vUv-DIR*3.2308).rgb))*.0702703;
+ o=vec4(enc(c),1.);}`;
+const ACC_FS = COMMON + `in vec2 vUv;out vec4 o;uniform sampler2D S,P;uniform vec2 TX;uniform float AL;
+void main(){vec3 c=dec(texture(S,vUv).rgb);vec3 mn=c,mx=c;
+ for(int j=-1;j<=1;j++)for(int i=-1;i<=1;i++){vec3 q=dec(texture(S,vUv+TX*vec2(i,j)).rgb);mn=min(mn,q);mx=max(mx,q);}
+ vec3 p=clamp(dec(texture(P,vUv).rgb),mn,mx);
+ o=vec4(enc(mix(p,c,AL)),1.);}`;
+const COMP_FS = COMMON + `in vec2 vUv;out vec4 o;uniform sampler2D S,B1,B2;uniform float T,HS;uniform vec2 R;uniform vec4 HZ;
+void main(){
+ vec2 hq=(vUv-HZ.xy)/HZ.zw;float hm=exp(-hq.x*hq.x*2.5)*smoothstep(-1.,.0,hq.y)*smoothstep(1.4,.2,hq.y);
+ vec2 off=vec2(noise(vUv*vec2(38.,20.)+vec2(0.,-T*2.2))-.5,noise(vUv*vec2(30.,16.)+vec2(7.,-T*1.8))-.5);
+ vec2 su=vUv+off*hm*HS/R*R.y*.0045;
+ vec3 c=dec(texture(S,su).rgb);
+ c+=dec(texture(B1,vUv).rgb)*.5+dec(texture(B2,vUv).rgb)*1.;
+ c*=1.15*(1.-.45*dot(vUv-.5,vUv-.5));
+ c=(c*(2.51*c+.03))/(c*(2.43*c+.59)+.14);
+ c=pow(clamp(c,0.,1.),vec3(1./2.2));
+ c+=(h1(vUv*R+fract(T*13.7)*vec2(91.,37.))-.5)*.035*(c+.02);
+ o=vec4(c,1.);}`;
+
+/* ---------- 即時合成音效 ---------- */
+const audio = {
+  ctx:null, on:false, vol:0.7, fade:1, rain:false,
+  start(){
+    if (this.ctx){ this.ctx.resume(); this.on=true; this.setVol(); return; }
+    const ctx = this.ctx = new (window.AudioContext||window.webkitAudioContext)();
+    const sr = ctx.sampleRate;
+    this.comp = ctx.createDynamicsCompressor(); this.comp.threshold.value=-14; this.comp.ratio.value=4;
+    this.out = ctx.createGain(); this.out.gain.value=0; this.comp.connect(this.out).connect(ctx.destination);
+    this.master = ctx.createGain(); this.master.gain.value=1; this.master.connect(this.comp);
+    // 房間殘響：即時產生的脈衝響應
+    const irLen=Math.floor(sr*2.2), ir=ctx.createBuffer(2,irLen,sr);
+    for (let ch=0; ch<2; ch++){ const d=ir.getChannelData(ch); let lp=0;
+      for (let i=0;i<irLen;i++){ const tt=i/sr; lp+= ( (rnd()*2-1) - lp )*(0.5-0.4*Math.min(1,tt/1.5));
+        d[i]=lp*Math.exp(-tt*3.2)*(tt<0.012?tt/0.012:1); } }
+    this.conv=ctx.createConvolver(); this.conv.buffer=ir;
+    this.wet=ctx.createGain(); this.wet.gain.value=0.32;
+    this.master.connect(this.conv); this.conv.connect(this.wet).connect(this.comp);
+    // 窗外雨聲
+    this.rainBus=ctx.createGain(); this.rainBus.gain.value=0; this.rainBus.connect(this.comp);
+    const pink=ctx.createBuffer(2,sr*4,sr);
+    for (let ch=0; ch<2; ch++){ const d=pink.getChannelData(ch); let b0=0,b1=0,b2=0;
+      for (let i=0;i<d.length;i++){ const w=rnd()*2-1; b0=0.997*b0+w*0.029; b1=0.985*b1+w*0.032; b2=0.95*b2+w*0.048; d[i]=(b0+b1+b2+w*0.05)*1.4; } }
+    const rbp=ctx.createBiquadFilter(); rbp.type='bandpass'; rbp.frequency.value=1600; rbp.Q.value=0.35;
+    const rlp=ctx.createBiquadFilter(); rlp.type='lowpass'; rlp.frequency.value=5200;
+    const rg=ctx.createGain(); rg.gain.value=0.55;
+    this._loopSrc=null;
+    // 棕噪音（低沉的火焰呼嘯）
+    const brown = ctx.createBuffer(2, sr*6, sr);
+    for (let ch=0; ch<2; ch++){ const d=brown.getChannelData(ch); let last=0; for (let i=0;i<d.length;i++){ last=(last+0.02*(rnd()*2-1))/1.02; d[i]=last*3.5; } }
+    const white = ctx.createBuffer(2, sr*3, sr);
+    for (let ch=0; ch<2; ch++){ const d=white.getChannelData(ch); for (let i=0;i<d.length;i++) d[i]=rnd()*2-1; }
+    const loop=(buf)=>{const s=ctx.createBufferSource(); s.buffer=buf; s.loop=true; s.start(0, rnd()*buf.duration); return s;};
+    this.roarLP = ctx.createBiquadFilter(); this.roarLP.type='lowpass'; this.roarLP.frequency.value=380; this.roarLP.Q.value=0.6;
+    this.roarG = ctx.createGain(); this.roarG.gain.value=0.2;
+    loop(brown).connect(this.roarLP).connect(this.roarG).connect(this.master);
+    this.rumLP = ctx.createBiquadFilter(); this.rumLP.type='lowpass'; this.rumLP.frequency.value=110;
+    this.rumG = ctx.createGain(); this.rumG.gain.value=0.25;
+    loop(brown).connect(this.rumLP).connect(this.rumG).connect(this.master);
+    this.hissHP = ctx.createBiquadFilter(); this.hissHP.type='highpass'; this.hissHP.frequency.value=2500;
+    this.hissG = ctx.createGain(); this.hissG.gain.value=0.012;
+    loop(white).connect(this.hissHP).connect(this.hissG).connect(this.master);
+    loop(pink).connect(rbp).connect(rlp).connect(rg).connect(this.rainBus);
+    const rum=ctx.createBiquadFilter(); rum.type='lowpass'; rum.frequency.value=250; const rumg=ctx.createGain(); rumg.gain.value=0.25;
+    loop(brown).connect(rum).connect(rumg).connect(this.rainBus);
+    this.on = true; this.setVol();
+  },
+  stop(){ if (!this.ctx) return; this.on=false; this.out.gain.setTargetAtTime(0,this.ctx.currentTime,0.15); },
+  setVol(){ if (this.ctx && this.on) this.out.gain.setTargetAtTime(this.vol*this.fade,this.ctx.currentTime,0.1); },
+  drop(){
+    const ctx=this.ctx, sr=ctx.sampleRate, n=Math.floor(sr*0.03), buf=ctx.createBuffer(1,n,sr), d=buf.getChannelData(0);
+    const f=1800+rnd()*5000, dec=sr*(0.002+rnd()*0.006);
+    for (let i=0;i<n;i++) d[i]=(Math.sin(i/sr*f*6.283)*0.6+(rnd()*2-1)*0.4)*Math.exp(-i/dec);
+    const src=ctx.createBufferSource(); src.buffer=buf; const g=ctx.createGain(); g.gain.value=0.04+rnd()*0.12;
+    const hp=ctx.createBiquadFilter(); hp.type='highpass'; hp.frequency.value=1500;
+    src.connect(hp).connect(g);
+    if (ctx.createStereoPanner){ const pn=ctx.createStereoPanner(); pn.pan.value=-0.4-rnd()*0.55; g.connect(pn).connect(this.rainBus); } else g.connect(this.rainBus);
+    src.start(ctx.currentTime+rnd()*0.02);
+  },
+  update(I, flare, dt){
+    if (!this.on) return; const t=this.ctx.currentTime;
+    this.out.gain.setTargetAtTime(this.vol*this.fade, t, 0.3);
+    this.rainBus.gain.setTargetAtTime(this.rain?0.3:0, t, 0.8);
+    if (this.rain && dt) { let k=rnd()<18*dt?1:0; while(k--) this.drop(); }
+    this.roarG.gain.setTargetAtTime(0.12+0.28*I*I+0.25*flare, t, 0.06);
+    this.roarLP.frequency.setTargetAtTime(260+420*I+600*flare, t, 0.06);
+    this.rumG.gain.setTargetAtTime(0.18+0.22*I, t, 0.1);
+    this.hissG.gain.setTargetAtTime(0.006+0.012*I+0.03*flare, t, 0.08);
+  },
+  // 單次木柴爆裂：每次都即時產生新的波形
+  crackle(s, delay=0){
+    if (!this.on) return; const ctx=this.ctx, sr=ctx.sampleRate;
+    const n = Math.floor(sr*(0.006+0.06*s)), buf=ctx.createBuffer(1,n,sr), d=buf.getChannelData(0);
+    const clicks = 1+Math.floor(rnd()*(1+7*s));
+    for (let k=0;k<clicks;k++){
+      const st=Math.floor(rnd()*n*0.75), amp=(0.3+rnd()*0.7)*(k===0?1:0.6), dec=sr*(0.0002+rnd()*0.002), len=Math.min(n-st, Math.floor(dec*7));
+      for (let i=0;i<len;i++) d[st+i]+=(rnd()*2-1)*amp*Math.exp(-i/dec);
+    }
+    const src=ctx.createBufferSource(); src.buffer=buf;
+    const bp=ctx.createBiquadFilter(); bp.type='bandpass'; bp.frequency.value=900+rnd()*4800*(1-0.5*s); bp.Q.value=0.5+rnd()*1.2;
+    const g=ctx.createGain(); g.gain.value=0.25+0.9*s;
+    const pan=ctx.createStereoPanner? ctx.createStereoPanner():null;
+    src.connect(bp).connect(g);
+    if (pan){ pan.pan.value=(rnd()*2-1)*0.6; g.connect(pan).connect(this.master); } else g.connect(this.master);
+    src.start(ctx.currentTime+0.004+delay);
+  },
+  pop(){
+    if (!this.on) return; const ctx=this.ctx, sr=ctx.sampleRate;
+    const n=Math.floor(sr*0.12), buf=ctx.createBuffer(1,n,sr), d=buf.getChannelData(0), dec=sr*(0.006+rnd()*0.01);
+    for (let i=0;i<n;i++) d[i]=(rnd()*2-1)*Math.exp(-i/dec);
+    const src=ctx.createBufferSource(); src.buffer=buf;
+    const bp=ctx.createBiquadFilter(); bp.type='bandpass'; bp.frequency.value=280+rnd()*600; bp.Q.value=0.9;
+    const g=ctx.createGain(); g.gain.value=1.6;
+    src.connect(bp).connect(g).connect(this.master); src.start(ctx.currentTime+0.004);
+    for (let k=0;k<6;k++) this.crackle(0.3+rnd()*0.5, 0.02+rnd()*0.35);
+  }
+};
+
+
+const cv=document.getElementById('gl'), fx=document.getElementById('fx'), fctx=fx.getContext('2d');
+const rnd=Math.random;
+const P=new Float32Array(512); for(let i=0;i<512;i++) P[i]=rnd();
+const vn=x=>{const i=Math.floor(x),f=x-i,u=f*f*(3-2*f);return P[i&511]+(P[(i+1)&511]-P[i&511])*u;};
+let W=0,H=0,dpr=1;
+
+/* ---------- 設定（記在這台瀏覽器） ---------- */
+const QUAL={ low:{cap:1,q:.55,steps:22}, mid:{cap:1.5,q:.75,steps:30}, high:{cap:2,q:1,steps:40} };
+const S={ quality:'mid', burn:false, sway:true, rain:false, sleep:0 };
+try{ Object.assign(S, JSON.parse(localStorage.getItem('fireplace-settings')||'{}')); }catch(e){}
+const saveS=()=>{ try{ localStorage.setItem('fireplace-settings', JSON.stringify({quality:S.quality,burn:S.burn,sway:S.sway,rain:S.rain})); }catch(e){} };
+let glQ=QUAL[S.quality].q;
+
+/* ---------- 鏡頭 ---------- */
+const CAMSET={ yaw:34, pitch:17, dist:2.75, target:[0.06,0.55,0.0] };
+let CAM=[0,0,0], TGT=CAMSET.target, FT=0.4, basis=null, dragYaw=0, dragPitch=0, camMoved=0;
+const sub=(a,b)=>[a[0]-b[0],a[1]-b[1],a[2]-b[2]], dot=(a,b)=>a[0]*b[0]+a[1]*b[1]+a[2]*b[2];
+const cross=(a,b)=>[a[1]*b[2]-a[2]*b[1],a[2]*b[0]-a[0]*b[2],a[0]*b[1]-a[1]*b[0]];
+const norm=a=>{const l=Math.hypot(a[0],a[1],a[2]);return [a[0]/l,a[1]/l,a[2]/l];};
+function setupCamera(t){
+  let yaw=CAMSET.yaw+dragYaw, pitch=CAMSET.pitch+dragPitch, D=CAMSET.dist;
+  if(S.sway){ yaw+=0.7*Math.sin(t*0.11)+0.3*Math.sin(t*0.27+1); pitch+=0.35*Math.sin(t*0.17+2); D+=0.025*Math.sin(t*0.13); }
+  const y=yaw*Math.PI/180, p=pitch*Math.PI/180, tg=TGT;
+  CAM=[tg[0]-D*Math.sin(y)*Math.cos(p), tg[1]+D*Math.sin(p), tg[2]-D*Math.cos(y)*Math.cos(p)];
+  FT=Math.max(0.4, 1.25/(D*(W/H)));
+  const f=norm(sub(TGT,CAM)), r=norm(cross([0,1,0],f)), u=cross(f,r);
+  basis={f,r,u};
+}
+function project(Pt){
+  const v=sub(Pt,CAM), z=dot(v,basis.f); if(z<=0.05) return null;
+  const A=W/H, x=dot(v,basis.r)/(z*FT*A), y=dot(v,basis.u)/(z*FT);
+  return [(x*0.5+0.5)*W, (0.5-y*0.5)*H, z];
+}
+function visible(Pt){
+  if(Pt[2]<=0) return true;
+  const v=sub(Pt,CAM), k=(0-CAM[2])/v[2], x=CAM[0]+v[0]*k, y=CAM[1]+v[1]*k;
+  return Math.abs(x)<0.5 && y>0 && y<0.6;
+}
+
+/* ---------- WebGL ---------- */
+let gl=null, GLX=null, useHalf=false, glReady=false, glFail='';
+const msg=t=>{ let m=document.getElementById('msg'); if(!m){ m=document.createElement('div'); m.id='msg';
+  m.style.cssText='position:fixed;inset:0;display:grid;place-items:center;color:#f3d3b0;font-size:15px;pointer-events:none;text-align:center;padding:20px'; document.body.appendChild(m); }
+  m.textContent=t; m.style.display=t?'grid':'none'; };
+function initGL(){
+  gl=cv.getContext('webgl2',{antialias:false,alpha:false,premultipliedAlpha:false,powerPreference:'high-performance'});
+  if(!gl){ glFail='這個瀏覽器不支援 WebGL2'; msg(glFail); return; }
+  useHalf=!!gl.getExtension('EXT_color_buffer_float');
+  const par=gl.getExtension('KHR_parallel_shader_compile');
+  const progs=[];
+  const sh=(type,src)=>{const s=gl.createShader(type);gl.shaderSource(s,src);gl.compileShader(s);return s;};
+  const mk=(fs,names)=>{const p=gl.createProgram();const v=sh(gl.VERTEX_SHADER,VS3),f=sh(gl.FRAGMENT_SHADER,fs);
+    gl.attachShader(p,v);gl.attachShader(p,f);gl.bindAttribLocation(p,0,'p');gl.linkProgram(p);
+    const o={p,v,f,names,u:{}};progs.push(o);return o;};
+  GLX={ scene:mk(SCENE_FS,['ZERO','R','JIT','T','I','FL','FT','CAM','TGT','FUEL','STEPS','MOON','SMK','NL']),
+        acc:mk(ACC_FS,['S','P','TX','AL']), bright:mk(BRIGHT_FS,['S','TX','TH']),
+        blur:mk(BLUR_FS,['S','DIR']), comp:mk(COMP_FS,['S','B1','B2','T','R','HZ','HS']) };
+  const b=gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER,b); gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([-1,-1,1,-1,-1,1,1,1]),gl.STATIC_DRAW);
+  gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0,2,gl.FLOAT,false,0,0);
+  msg('正在準備爐火…');
+  // 在背景編譯著色器，不卡住頁面
+  const finish=()=>{
+    for(const o of progs){ if(!gl.getProgramParameter(o.p,gl.LINK_STATUS)){
+      console.error(gl.getShaderInfoLog(o.f)||gl.getProgramInfoLog(o.p)); glFail='著色器編譯失敗'; msg(glFail); return; }
+      for(const n of o.names) o.u[n]=gl.getUniformLocation(o.p,n); }
+    glReady=true; msg(''); layout(); };
+  const poll=()=>{ if(progs.every(o=>gl.getProgramParameter(o.p,par.COMPLETION_STATUS_KHR))) finish(); else setTimeout(poll,50); };
+  if(par) poll(); else setTimeout(finish,0);
+  cv.addEventListener('webglcontextlost',e=>{ e.preventDefault(); glReady=false; msg('顯示卡被重置了，請重新整理頁面'); });
+}
+function makeRT(w,h){
+  const mkTex=half=>{ const t=gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D,t);
+    if(half) gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA16F,w,h,0,gl.RGBA,gl.HALF_FLOAT,null);
+    else gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA8,w,h,0,gl.RGBA,gl.UNSIGNED_BYTE,null);
+    for(const [k,v] of [[gl.TEXTURE_MIN_FILTER,gl.LINEAR],[gl.TEXTURE_MAG_FILTER,gl.LINEAR],[gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE],[gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE]]) gl.texParameteri(gl.TEXTURE_2D,k,v);
+    const f=gl.createFramebuffer(); gl.bindFramebuffer(gl.FRAMEBUFFER,f); gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.TEXTURE_2D,t,0);
+    return {t,f,ok:gl.checkFramebufferStatus(gl.FRAMEBUFFER)===gl.FRAMEBUFFER_COMPLETE}; };
+  let r = useHalf ? mkTex(true) : null;
+  if(!r || !r.ok){ if(r){ gl.deleteTexture(r.t); gl.deleteFramebuffer(r.f); } useHalf=false; r=mkTex(false); }
+  return {t:r.t,f:r.f,w,h};
+}
+const freeRT=r=>{ if(r){ gl.deleteTexture(r.t); gl.deleteFramebuffer(r.f); } };
+function layout(){
+  W=innerWidth; H=innerHeight; dpr=Math.min(devicePixelRatio||1,2);
+  fx.width=Math.round(W*dpr); fx.height=Math.round(H*dpr);
+  setupCamera(performance.now()/1000);
+  if(!gl||!glReady) return;
+  const s=Math.min(dpr,QUAL[S.quality].cap)*glQ;
+  cv.width=Math.max(4,Math.round(W*s)); cv.height=Math.max(4,Math.round(H*s));
+  for(const k of ['rs','a0','a1','b1a','b1b','b2a','b2b']) freeRT(GLX[k]);
+  const W1=Math.max(2,cv.width>>2), H1=Math.max(2,cv.height>>2);
+  GLX.rs=makeRT(cv.width,cv.height); GLX.a0=makeRT(cv.width,cv.height); GLX.a1=makeRT(cv.width,cv.height);
+  GLX.b1a=makeRT(W1,H1); GLX.b1b=makeRT(W1,H1);
+  GLX.b2a=makeRT(Math.max(2,W1>>1),Math.max(2,H1>>1)); GLX.b2b=makeRT(Math.max(2,W1>>1),Math.max(2,H1>>1));
+  GLX.fresh=true;
+}
+function pass(prog,target,setup){
+  gl.useProgram(prog.p);
+  if(target){ gl.bindFramebuffer(gl.FRAMEBUFFER,target.f); gl.viewport(0,0,target.w,target.h); }
+  else { gl.bindFramebuffer(gl.FRAMEBUFFER,null); gl.viewport(0,0,cv.width,cv.height); }
+  setup(prog.u); gl.drawArrays(gl.TRIANGLE_STRIP,0,4);
+}
+const bindTex=(u,unit,rt)=>{ gl.activeTexture(gl.TEXTURE0+unit); gl.bindTexture(gl.TEXTURE_2D,rt.t); gl.uniform1i(u,unit); };
+const halton=(i,b)=>{let f=1,r=0;while(i>0){f/=b;r+=f*(i%b);i=Math.floor(i/b);}return r;};
+let frameNo=0;
+function renderGL(t,I,flare,fuel,NL,heat){
+  if(!gl||!glReady||!GLX.rs) return; const X=GLX, tt=t%500; frameNo++;
+  const jx=halton(frameNo%8+1,2)-0.5, jy=halton(frameNo%8+1,3)-0.5;
+  pass(X.scene,X.rs,u=>{ gl.uniform1i(u.ZERO,0); gl.uniform2f(u.R,cv.width,cv.height); gl.uniform2f(u.JIT,jx,jy); gl.uniform1f(u.T,tt); gl.uniform1f(u.I,I); gl.uniform1f(u.FL,flare);
+    gl.uniform1f(u.FT,FT); gl.uniform3f(u.CAM,CAM[0],CAM[1],CAM[2]); gl.uniform3f(u.TGT,TGT[0],TGT[1],TGT[2]);
+    gl.uniform1f(u.FUEL,fuel); gl.uniform1f(u.STEPS,QUAL[S.quality].steps); gl.uniform1f(u.MOON,1); gl.uniform1f(u.SMK,1);
+    gl.uniform4f(u.NL,NL[0],NL[1],NL[2],NL[3]); });
+  const al = X.fresh ? 1 : Math.min(1, 0.14 + camMoved*6);
+  X.fresh=false;
+  pass(X.acc,X.a1,u=>{ bindTex(u.S,0,X.rs); bindTex(u.P,1,X.a0); gl.uniform2f(u.TX,1/X.rs.w,1/X.rs.h); gl.uniform1f(u.AL,al); });
+  const cur=X.a1; X.a1=X.a0; X.a0=cur;
+  pass(X.bright,X.b1a,u=>{ bindTex(u.S,0,cur); gl.uniform2f(u.TX,1/cur.w,1/cur.h); gl.uniform1f(u.TH,0.35); });
+  pass(X.blur,X.b1b,u=>{ bindTex(u.S,0,X.b1a); gl.uniform2f(u.DIR,1.4/X.b1a.w,0); });
+  pass(X.blur,X.b1a,u=>{ bindTex(u.S,0,X.b1b); gl.uniform2f(u.DIR,0,1.4/X.b1a.h); });
+  pass(X.bright,X.b2a,u=>{ bindTex(u.S,0,X.b1a); gl.uniform2f(u.TX,0.5/X.b1a.w,0.5/X.b1a.h); gl.uniform1f(u.TH,0); });
+  pass(X.blur,X.b2b,u=>{ bindTex(u.S,0,X.b2a); gl.uniform2f(u.DIR,2/X.b2a.w,0); });
+  pass(X.blur,X.b2a,u=>{ bindTex(u.S,0,X.b2b); gl.uniform2f(u.DIR,0,2/X.b2a.h); });
+  // 熱氣扭曲區域：火堆上方投影到畫面
+  const c0=project([0,0.36,0.2]), c1=project([0.32,0.36,0.2]), c2=project([0,0.62,0.18]);
+  let hz=[0.5,0.5,0.1,0.1];
+  if(c0&&c1&&c2) hz=[c0[0]/W, 1-c0[1]/H, Math.max(0.01,Math.abs(c1[0]-c0[0])/W), Math.max(0.01,Math.abs(c0[1]-c2[1])/H)];
+  pass(X.comp,null,u=>{ bindTex(u.S,0,cur); bindTex(u.B1,1,X.b1a); bindTex(u.B2,2,X.b2a); gl.uniform1f(u.T,tt); gl.uniform2f(u.R,cv.width,cv.height);
+    gl.uniform4f(u.HZ,hz[0],hz[1],hz[2],hz[3]); gl.uniform1f(u.HS,heat); });
+}
+
+/* ---------- 3D 火星 ---------- */
+const sparks=[];
+function spawn(n,power=1,escape=0,at){
+  for(let i=0;i<n;i++){
+    const esc=rnd()<escape;
+    const p0=at?[at[0]+(rnd()-0.5)*0.5,at[1]+rnd()*0.05,at[2]+(rnd()-0.5)*0.1]:[(rnd()-0.5)*0.5, 0.2+rnd()*0.12, 0.15+rnd()*0.15];
+    sparks.push({ p:p0,
+      v: esc?[(rnd()-0.5)*0.8, 0.5+rnd()*0.9, -(0.7+rnd()*0.9)] : [(rnd()-0.5)*0.15*power, (0.25+rnd()*0.6)*power, (rnd()-0.5)*0.1],
+      life:0, max:esc?(2+rnd()*2.5):(0.7+rnd()*1.6), size:0.6+rnd()*1.4, ph:rnd()*6.28, esc, rest:false });
+  }
+  if(sparks.length>500) sparks.splice(0,sparks.length-500);
+}
+const sprite=(()=>{const c=document.createElement('canvas');c.width=c.height=64;const x=c.getContext('2d');
+  const g=x.createRadialGradient(32,32,0,32,32,32);g.addColorStop(0,'rgba(255,200,110,1)');g.addColorStop(0.3,'rgba(255,110,30,.5)');g.addColorStop(1,'rgba(255,60,10,0)');
+  x.fillStyle=g;x.fillRect(0,0,64,64);return c;})();
+function drawSparks(t,dt){
+  const c=fctx; c.setTransform(dpr,0,0,dpr,0,0); c.clearRect(0,0,W,H); c.globalCompositeOperation='lighter'; c.lineCap='round';
+  for(let i=sparks.length-1;i>=0;i--){
+    const s=sparks[i]; s.life+=dt; if(s.life>s.max){ sparks.splice(i,1); continue; }
+    const p=s.p, v=s.v;
+    if(s.esc){
+      if(!s.rest){ v[1]-=2.6*dt; for(let k=0;k<3;k++) p[k]+=v[k]*dt;
+        const onHearth=Math.abs(p[0])<0.82 && p[2]>-0.28 && p[2]<0.04, gy=onHearth?-0.01:(p[2]<0.04?-0.09:0);
+        { const Rr=1.131, Z=0.871, r=Math.hypot(p[0],p[2]-Z), r0=Math.hypot(p[0]-v[0]*dt,p[2]-v[2]*dt-Z);
+          if(r>Rr && r0<=Rr && p[1]<0.28 && Math.abs(Math.atan2(p[0],Z-p[2]))<0.54){ const k=(Rr-0.002)/r; p[0]*=k; p[2]=Z+(p[2]-Z)*k; v[0]*=-0.25; v[2]*=-0.25; } }
+        if(p[2]>0 && p[1]<0) { p[1]=0; v[1]*=-0.3; }
+        else if(p[1]<gy && v[1]<0){ p[1]=gy; v[1]*=-0.28; v[0]*=0.5; v[2]*=0.5; if(Math.abs(v[1])<0.12) s.rest=true; } }
+    } else {
+      v[1]+=0.5*dt; v[0]+=Math.sin(t*5+s.ph)*0.5*dt; v[0]*=0.985; for(let k=0;k<3;k++) p[k]+=v[k]*dt;
+      if(p[1]>0.62+0.25*Math.max(p[2],0)){ sparks.splice(i,1); continue; }
+    }
+    if(!visible(p)) continue;
+    const a=project(p); if(!a) continue;
+    const b=project([p[0]-v[0]*0.025,p[1]-v[1]*0.025,p[2]-v[2]*0.025]);
+    const heat=1-s.life/s.max, sz=Math.max(0.6, s.size*0.006/(a[2]*FT)*H*0.5);
+    c.strokeStyle=`rgba(255,${(110+140*heat)|0},${(30+120*heat*heat)|0},${Math.min(1,heat*1.5)})`;
+    c.lineWidth=sz; c.beginPath(); c.moveTo(a[0],a[1]); if(b) c.lineTo(b[0],b[1]); else c.lineTo(a[0],a[1]+0.1); c.stroke();
+    c.globalAlpha=heat*0.45; const g=sz*5; c.drawImage(sprite,a[0]-g,a[1]-g,g*2,g*2); c.globalAlpha=1;
+  }
+}
+
+/* ---------- 燃燒與添柴 ---------- */
+const BURN_SECONDS=12*60;               // 一次添滿大約燒 12 分鐘
+let fuel=1, newLog={on:false,y:0,vy:0,landed:true,age:1};
+function addLog(){
+  if(!S.burn){ flare=Math.min(1.3,flare+0.6); audio.pop(); spawn(40,1.5,0.3); return; }
+  fuel=Math.min(1,fuel+0.5);
+  if(!newLog.on || newLog.landed && newLog.age>0.6){ newLog={on:true,y:0.5,vy:0,landed:false,age:0}; }
+  else { flare=Math.min(1.3,flare+0.4); audio.pop(); spawn(25,1.3,0.2); }
+}
+function updateBurn(dt){
+  if(!S.burn){ fuel=1; newLog.on=false; return; }
+  fuel=Math.max(0, fuel-dt/BURN_SECONDS);
+  if(newLog.on){
+    if(!newLog.landed){
+      newLog.vy-=3.2*dt; newLog.y+=newLog.vy*dt;
+      if(newLog.y<=0){ newLog.y=0;
+        if(newLog.vy<-0.6){ audio.pop(); audio.crackle(0.9); spawn(35,1.4,0.35,[0.0,0.3,0.19]); flare=Math.min(1.3,flare+0.7); newLog.vy*=-0.22; }
+        else { newLog.vy=0; newLog.landed=true; } }
+    }
+    newLog.age=Math.min(1,newLog.age+dt/90);
+    if(fuel<0.12) newLog.on=false;
+  }
+}
+
+/* ---------- 睡眠計時 ---------- */
+let sleepEnd=0;
+function sleepFade(now){
+  if(!sleepEnd) return 1;
+  const r=(sleepEnd-now)/1000;
+  return Math.max(0, Math.min(1, r/150));
+}
+
+/* ---------- 主迴圈 ---------- */
+let last=performance.now()/1000, flare=0, t0=rnd()*100, slow=0, fast=0, prevCam=null;
+function frame(now){
+  const t=now/1000, dt=Math.min(0.05,t-last); last=t;
+  if(dt>0.03){ slow++; fast=0; } else if(dt<0.018){ fast++; slow=0; }
+  const qb=QUAL[S.quality].q;
+  if(slow>40 && glQ>qb*0.6){ glQ=Math.max(qb*0.6,glQ-0.06); slow=0; layout(); }
+  if(fast>240 && glQ<qb){ glQ=Math.min(qb,glQ+0.06); fast=0; layout(); }
+  setupCamera(t);
+  camMoved = prevCam ? Math.hypot(CAM[0]-prevCam[0],CAM[1]-prevCam[1],CAM[2]-prevCam[2]) : 1; prevCam=CAM.slice();
+  updateBurn(dt);
+  const fade=sleepFade(now); audio.fade=fade;
+  const fm=S.burn ? 0.08+0.92*Math.pow(fuel,0.55) : 1;
+  flare*=Math.exp(-dt*1.3);
+  const base=0.72+0.17*vn(t*0.5)+0.11*vn(t*2.2+40);
+  const I=(base*fm+0.15*flare)*(0.06+0.94*fade);
+  const act=fm*fade;
+  if(rnd()<(6+6*I)*dt*act){ const s=rnd()**2.2; audio.crackle(s*Math.max(0.3,act)); if(s>0.25||rnd()<0.3) spawn(1+Math.floor(s*8*act),0.8+s, s>0.6?0.2:0); }
+  if(rnd()<0.09*dt*act){ audio.pop(); spawn(20+Math.floor(rnd()*14),1.3,0.35); flare=Math.min(1.2,flare+0.35); }
+  if(rnd()<2*dt*act) spawn(1,0.7);
+  audio.rain=S.rain; audio.update(I,flare,dt);
+  const NL=[newLog.on?1:0, newLog.y, newLog.age, Math.min(1,0.35+fuel)];
+  renderGL(t+t0,I,flare,S.burn?fuel:1,NL,(0.4+0.6*I)*fade);
+  drawSparks(t,dt);
+  if(panelOpen) updatePanel(now);
+  requestAnimationFrame(frame);
+}
+
+/* ---------- 介面 ---------- */
+const $=id=>document.getElementById(id);
+const sndBtn=$('snd'), vol=$('vol'), panel=$('panel');
+let panelOpen=false;
+const setUI=()=>{ sndBtn.textContent=audio.on?'🔊':'🔇'; };
+function updatePanel(now){
+  $('fuelRow').style.display=S.burn?'':'none';
+  $('fuelBar').style.width=Math.round(fuel*100)+'%';
+  if(sleepEnd){ const r=Math.max(0,(sleepEnd-now)/1000); $('sleepLeft').textContent=r>0?`剩 ${Math.floor(r/60)}:${String(Math.floor(r%60)).padStart(2,'0')}`:'已熄滅'; }
+  else $('sleepLeft').textContent='';
+}
+function syncPanel(){
+  document.querySelectorAll('[data-q]').forEach(b=>b.classList.toggle('on',b.dataset.q===S.quality));
+  $('optBurn').checked=S.burn; $('optSway').checked=S.sway; $('optRain').checked=S.rain; $('optSleep').value=String(S.sleep);
+  updatePanel(performance.now());
+}
+$('gear').onclick=e=>{ e.stopPropagation(); panelOpen=!panelOpen; panel.hidden=!panelOpen; syncPanel(); };
+document.querySelectorAll('[data-q]').forEach(b=>b.onclick=()=>{ S.quality=b.dataset.q; glQ=QUAL[S.quality].q; saveS(); syncPanel(); layout(); });
+$('optBurn').onchange=e=>{ S.burn=e.target.checked; if(S.burn){ fuel=1; } saveS(); syncPanel(); };
+$('optSway').onchange=e=>{ S.sway=e.target.checked; saveS(); };
+$('optRain').onchange=e=>{ S.rain=e.target.checked; if(S.rain&&!audio.ctx){ audio.start(); setUI(); } saveS(); };
+$('optSleep').onchange=e=>{ S.sleep=+e.target.value; sleepEnd=S.sleep?performance.now()+S.sleep*60000:0; syncPanel(); };
+$('addLog').onclick=()=>{ if(!audio.ctx){ audio.start(); setUI(); } addLog(); };
+$('resetView').onclick=()=>{ dragYaw=0; dragPitch=0; };
+sndBtn.onclick=()=>{ audio.on?audio.stop():audio.start(); setUI(); };
+vol.oninput=()=>{ audio.vol=+vol.value; audio.setVol(); };
+const fsT=()=>{ document.fullscreenElement?document.exitFullscreen():document.documentElement.requestFullscreen?.().catch(()=>{}); };
+$('fs').onclick=fsT;
+addEventListener('keydown',e=>{ if(e.key==='f'||e.key==='F') fsT(); });
+
+// 拖曳轉視角；沒拖曳的點擊 = 添柴（點在爐火附近）
+let down=null;
+cv.addEventListener('pointerdown',e=>{ down={x:e.clientX,y:e.clientY,yaw:dragYaw,pitch:dragPitch,drag:false}; cv.setPointerCapture(e.pointerId);
+  if(panelOpen){ panelOpen=false; panel.hidden=true; } });
+cv.addEventListener('pointermove',e=>{ if(!down) return; const dx=e.clientX-down.x, dy=e.clientY-down.y;
+  if(!down.drag && Math.hypot(dx,dy)>6) down.drag=true;
+  if(down.drag){ dragYaw=Math.max(-22,Math.min(22,down.yaw-dx*0.12)); dragPitch=Math.max(-10,Math.min(14,down.pitch+dy*0.08)); } });
+cv.addEventListener('pointerup',e=>{
+  if(down && !down.drag){
+    if(!audio.ctx){ audio.start(); setUI(); }
+    const c=project([0,0.25,0.15]), e1=project([0.5,0.25,0.0]);
+    if(c&&e1 && Math.hypot(e.clientX-c[0],e.clientY-c[1]) < Math.abs(e1[0]-c[0])*1.1) addLog();
+  }
+  down=null; });
+cv.addEventListener('dblclick',()=>{ dragYaw=0; dragPitch=0; });
+let idleT; const wake=()=>{ document.body.classList.remove('idle'); clearTimeout(idleT); idleT=setTimeout(()=>{ if(!panelOpen) document.body.classList.add('idle'); },3000); };
+addEventListener('pointermove',wake); addEventListener('pointerdown',wake); wake();
+let rz; addEventListener('resize',()=>{ cancelAnimationFrame(rz); rz=requestAnimationFrame(layout); });
+initGL();
+layout(); syncPanel(); requestAnimationFrame(frame);
+
+})();
+</script>
+</body>
+</html>
