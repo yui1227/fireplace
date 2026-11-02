@@ -1,0 +1,13 @@
+{
+  "name": "fireplace",
+  "version": "1.0.0",
+  "private": true,
+  "description": "即時運算的 3D 壁爐網頁（WebGL2 光線步進 + Web Audio 即時合成）",
+  "type": "module",
+  "license": "MIT",
+  "scripts": {
+    "dev": "npx serve .",
+    "build": "node tools/build.mjs",
+    "format": "npx prettier@3 --write \"src/**/*.{js,css}\" index.html tools && clang-format -i src/shaders/*.* src/shaders/*/*"
+  }
+}

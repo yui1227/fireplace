@@ -1,0 +1,1392 @@
+<!doctype html>
+<html lang="zh-Hant">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>壁爐</title>
+    <style>
+html,
+body {
+  margin: 0;
+  height: 100%;
+  background: #000;
+  overflow: hidden;
+  font-family:
+    system-ui,
+    -apple-system,
+    'PingFang TC',
+    'Noto Sans TC',
+    sans-serif;
+}
+[hidden] {
+  display: none !important;
+}
+canvas {
+  position: fixed;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+/* 火星畫在上層，用 screen 疊加 */
+#fx {
+  mix-blend-mode: screen;
+  pointer-events: none;
+}
+#msg {
+  position: fixed;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  color: #f3d3b0;
+  font-size: 15px;
+  text-align: center;
+  pointer-events: none;
+}
+
+/* 右下角控制列與設定面板 */
+#ui {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  color: #f3d3b0;
+  font-size: 13px;
+  background: rgba(20, 10, 6, 0.55);
+  padding: 8px 12px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 190, 130, 0.15);
+  transition: opacity 0.8s;
+}
+#ui button {
+  background: none;
+  border: 1px solid rgba(255, 190, 130, 0.3);
+  color: inherit;
+  border-radius: 8px;
+  padding: 5px 9px;
+  font: inherit;
+  cursor: pointer;
+}
+#ui input[type='range'] {
+  accent-color: #e8813a;
+  width: 90px;
+}
+#ui input[type='checkbox'] {
+  accent-color: #e8813a;
+  width: 18px;
+  height: 18px;
+}
+.bar-main {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  justify-content: flex-end;
+}
+#panel {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 4px 2px 10px;
+  margin-bottom: 8px;
+  border-bottom: 1px solid rgba(255, 190, 130, 0.15);
+  min-width: 260px;
+}
+#panel .row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+#panel small {
+  display: block;
+  opacity: 0.6;
+  font-size: 11px;
+}
+#panel .seg {
+  display: flex;
+  gap: 4px;
+}
+#panel .seg button.on {
+  background: rgba(232, 129, 58, 0.35);
+  border-color: #e8813a;
+}
+#panel select {
+  background: #2a1a12;
+  color: inherit;
+  border: 1px solid rgba(255, 190, 130, 0.3);
+  border-radius: 8px;
+  padding: 4px 6px;
+  font: inherit;
+}
+#panel .bar {
+  flex: 1;
+  height: 6px;
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 3px;
+  overflow: hidden;
+}
+#panel .bar i {
+  display: block;
+  height: 100%;
+  background: linear-gradient(90deg, #b8401a, #f0a040);
+}
+#panel .hint {
+  font-size: 11px;
+  opacity: 0.7;
+}
+
+/* 閒置時隱藏控制列與游標 */
+body.idle #ui {
+  opacity: 0;
+}
+body.idle {
+  cursor: none;
+}
+</style>
+  </head>
+  <body>
+    <canvas id="gl"></canvas>
+    <canvas id="fx"></canvas>
+
+    <div id="ui">
+      <div id="panel" hidden>
+        <div class="row">
+          <span>畫質</span>
+          <span class="seg">
+            <button data-q="low">低</button><button data-q="mid">中</button><button data-q="high">高</button>
+          </span>
+        </div>
+        <label class="row">
+          <span>自然燃燒<small>火會慢慢燒完，需要添柴</small></span>
+          <input type="checkbox" id="optBurn" />
+        </label>
+        <div class="row" id="fuelRow">
+          <span>柴火</span><span class="bar"><i id="fuelBar"></i></span><button id="addLog">🪵 添柴</button>
+        </div>
+        <label class="row"><span>鏡頭晃動</span><input type="checkbox" id="optSway" /></label>
+        <label class="row"><span>窗外雨聲</span><input type="checkbox" id="optRain" /></label>
+        <div class="row">
+          <span>睡眠計時 <small id="sleepLeft"></small></span>
+          <select id="optSleep">
+            <option value="0">關</option>
+            <option value="15">15 分</option>
+            <option value="30">30 分</option>
+            <option value="60">60 分</option>
+            <option value="90">90 分</option>
+          </select>
+        </div>
+        <div class="row hint">
+          <span>拖曳畫面轉動視角，雙擊回正；點爐火添柴</span><button id="resetView">回正</button>
+        </div>
+      </div>
+      <div class="bar-main">
+        <button id="snd" title="聲音">🔇</button>
+        <input id="vol" type="range" min="0" max="1" step="0.01" value="0.7" aria-label="音量" />
+        <button id="gear" title="設定">⚙</button>
+        <button id="fs" title="全螢幕 (F)">⛶</button>
+      </div>
+    </div>
+
+    <script>
+(() => {
+'use strict';
+const INLINE_SHADERS = {
+ "common.glsl": "#version 300 es\nprecision highp float;\nprecision highp int;\n// 所有著色器共用：雜湊、2D 值雜訊、HDR 編碼（中間畫面以 gamma 編碼＋抖動儲存）\nfloat h1(vec2 p) {\n  p = fract(p * vec2(123.34, 456.21));\n  p += dot(p, p + 45.32);\n  return fract(p.x * p.y);\n}\nvec2 h2(vec2 p) {\n  float n = h1(p);\n  return vec2(n, h1(p + n * 17.13 + 3.1));\n}\nfloat noise(vec2 p) {\n  vec2 i = floor(p), f = fract(p), u = f * f * (3. - 2. * f);\n  return mix(mix(h1(i), h1(i + vec2(1, 0)), u.x), mix(h1(i + vec2(0, 1)), h1(i + vec2(1, 1)), u.x), u.y);\n}\nvec3 enc(vec3 c) {\n  c = clamp(c, 0., 6e4);\n  return max(pow(c / (1. + c), vec3(1. / 2.2)) + (h1(gl_FragCoord.xy * .913 + fract(c.r * 91.7)) - .5) / 255.,\n             0.);\n}\nvec3 dec(vec3 c) {\n  c = pow(clamp(c, 0., .998), vec3(2.2));\n  return c / (1. - c);\n}\n",
+ "fullscreen.vert": "#version 300 es\nin vec2 p;\nout vec2 vUv;\nvoid main() {\n  vUv = p * .5 + .5;\n  gl_Position = vec4(p, 0., 1.);\n}\n",
+ "post/accumulate.frag": "// 時間累積抗鋸齒：鄰域夾值避免殘影\nin vec2 vUv;\nout vec4 o;\nuniform sampler2D S, P;\nuniform vec2 TX;\nuniform float AL;\nvoid main() {\n  vec3 c = dec(texture(S, vUv).rgb);\n  vec3 mn = c, mx = c;\n  for (int j = -1; j <= 1; j++)\n    for (int i = -1; i <= 1; i++) {\n      vec3 q = dec(texture(S, vUv + TX * vec2(i, j)).rgb);\n      mn = min(mn, q);\n      mx = max(mx, q);\n    }\n  vec3 p = clamp(dec(texture(P, vUv).rgb), mn, mx);\n  o = vec4(enc(mix(p, c, AL)), 1.);\n}\n",
+ "post/blur.frag": "// 光暈：可分離高斯模糊\nin vec2 vUv;\nout vec4 o;\nuniform sampler2D S;\nuniform vec2 DIR;\nvoid main() {\n  vec3 c = dec(texture(S, vUv).rgb) * .227027;\n  c += (dec(texture(S, vUv + DIR * 1.3846).rgb) + dec(texture(S, vUv - DIR * 1.3846).rgb)) * .3162162;\n  c += (dec(texture(S, vUv + DIR * 3.2308).rgb) + dec(texture(S, vUv - DIR * 3.2308).rgb)) * .0702703;\n  o = vec4(enc(c), 1.);\n}\n",
+ "post/bright.frag": "// 光暈第一步：降取樣並取出亮部\nin vec2 vUv;\nout vec4 o;\nuniform sampler2D S;\nuniform vec2 TX;\nuniform float TH;\nvoid main() {\n  vec3 c = vec3(0.);\n  c += dec(texture(S, vUv + TX * vec2(-1, -1)).rgb);\n  c += dec(texture(S, vUv + TX * vec2(1, -1)).rgb);\n  c += dec(texture(S, vUv + TX * vec2(-1, 1)).rgb);\n  c += dec(texture(S, vUv + TX * vec2(1, 1)).rgb);\n  c *= .25;\n  c = max(c - TH, 0.);\n  o = vec4(enc(c), 1.);\n}\n",
+ "post/composite.frag": "// 最後合成：熱氣扭曲、光暈、ACES 色調映射、gamma、底片顆粒\nin vec2 vUv;\nout vec4 o;\nuniform sampler2D S, B1, B2;\nuniform float T, HS;\nuniform vec2 R;\nuniform vec4 HZ;\nvoid main() {\n  vec2 hq = (vUv - HZ.xy) / HZ.zw;\n  float hm = exp(-hq.x * hq.x * 2.5) * smoothstep(-1., .0, hq.y) * smoothstep(1.4, .2, hq.y);\n  vec2 off = vec2(noise(vUv * vec2(38., 20.) + vec2(0., -T * 2.2)) - .5,\n                  noise(vUv * vec2(30., 16.) + vec2(7., -T * 1.8)) - .5);\n  vec2 su = vUv + off * hm * HS / R * R.y * .0045;\n  vec3 c = dec(texture(S, su).rgb);\n  c += dec(texture(B1, vUv).rgb) * .5 + dec(texture(B2, vUv).rgb) * 1.;\n  c *= 1.15 * (1. - .45 * dot(vUv - .5, vUv - .5));\n  c = (c * (2.51 * c + .03)) / (c * (2.43 * c + .59) + .14);\n  c = pow(clamp(c, 0., 1.), vec3(1. / 2.2));\n  c += (h1(vUv * R + fract(T * 13.7) * vec2(91., 37.)) - .5) * .035 * (c + .02);\n  o = vec4(c, 1.);\n}\n",
+ "scene/fire.glsl": "// 體積火焰：五個火源，fbm 擾動決定密度與溫度\nvec4 src(int i) {\n  if (i == 0) return vec4(-.22, .2, .8, 0.);\n  if (i == 1) return vec4(-.08, .25, 1., 1.7);\n  if (i == 2) return vec4(.07, .2, 1.1, 3.1);\n  if (i == 3) return vec4(.22, .24, .85, 4.4);\n  return vec4(0., .3, .95, 5.9);\n}\nvec2 fireAt(vec3 p) {\n  float hh = p.y - .1;\n  if (hh < -.06) return vec2(0.);\n  hh = max(hh, 0.);\n  vec3 wp = p * vec3(3.5, 1.8, 3.5) + vec3(0., -T * 1.5, 0.);\n  vec2 w = vec2(n3(wp), n3(wp + vec3(7.3, 1.1, 3.7))) - .5;\n  vec2 xz = p.xz + w * (.05 + .4 * hh);\n  float s = 0., reach = .1;\n  for (int i = ZERO; i < 5; i++) {\n    vec4 sr = src(i);\n    float fl = .7 + .5 * noise(vec2(T * .8 + sr.w * 3., sr.w));\n    float hm = sr.z * fl * (.62 * I + .38 * FL + .14);\n    float wd = .12 * max(.04, 1. - hh / (hm + .01)) + .008;\n    vec2 dd = (xz - sr.xy) * vec2(1., 1.4);\n    float e = exp(-dot(dd, dd) / (wd * wd));\n    if (e > s) {\n      s = e;\n      reach = hm;\n    }\n  }\n  if (s < .03 || hh > reach * 1.3) return vec2(0.);\n  float n = fbm3(p * vec3(10., 4.2, 10.) + vec3(w.x, 0., w.y) * 2.5 + vec3(0., -T * 3.3, 0.));\n  float d = s * (n * 2. - .4) - hh / max(reach, .04) * .65 - smoothstep(reach * .85, reach * 1.3, hh) * .5;\n  if (d <= 0.) return vec2(0.);\n  return vec2(smoothstep(0., .12, d), clamp(d * 1.5 + .05, 0., 1.) * (1.2 - min(hh * 1.7, .9)));\n}\n",
+ "scene/lighting.glsl": "// 打光：爐膛內（火光點光源＋軟陰影）與房間（爐口火光、反射光、月光窗影）\nvec3 LP() {\n  return vec3(.04 * sin(T * 1.7) + .02 * sin(T * 4.1), .27 + .025 * sin(T * 2.3), .23);\n}\nfloat LI() {\n  return (1.1 + .5 * FL) * I * (.9 + .2 * noise(vec2(T * 9., 1.)));\n}\nfloat shadow(vec3 p, vec3 l) {\n  vec3 d = l - p;\n  float L = length(d);\n  d /= L;\n  float res = 1., t = .015;\n  for (int i = ZERO; i < 20; i++) {\n    float h = map(p + d * t).x;\n    res = min(res, 9. * h / t);\n    t += clamp(h, .008, .08);\n    if (res < .02 || t > L) break;\n  }\n  return clamp(res, 0., 1.);\n}\nvec3 lightIn(vec3 p, vec3 n, float sh) {\n  vec3 l = LP() - p;\n  float d2 = dot(l, l);\n  l = normalize(l);\n  vec3 c = vec3(1., .42, .13) * LI() * max(dot(n, l), 0.) / (1. + 20. * d2) * sh * 1.6;\n  vec3 l2 = vec3(0., .03, .23) - p;\n  float e2 = dot(l2, l2);\n  c += vec3(1., .3, .07) * .55 * I * max(dot(n, normalize(l2)), 0.) / (1. + 45. * e2);\n  return c + vec3(1., .35, .1) * .015 * I;\n}\nfloat shadowL(vec3 p, vec3 l, float k) {\n  vec3 d = l - p;\n  float L = length(d);\n  d /= L;\n  float res = 1., t = .02;\n  for (int i = ZERO; i < 18; i++) {\n    float h = map(p + d * t).x;\n    res = min(res, k * h / t);\n    t += clamp(h, .02, .3);\n    if (res < .02 || t > L - .05) break;\n  }\n  return clamp(res, 0., 1.);\n}\nvec3 lightRoom(vec3 p, vec3 n, vec3 rd, float gloss) {\n  vec3 o = vec3(.02 * sin(T * 1.7), .26, -.05);\n  vec3 lo = o - p;\n  float d2 = dot(lo, lo);\n  float dl = sqrt(d2);\n  vec3 ld = lo / dl;\n  float emit = clamp(-(p.z - o.z) / dl * 1.3, 0., 1.);\n  float fl = LI();\n  float fs = 1.;\n  if (p.z < -.06 && emit > 0. && d2 < 3.) fs = shadowL(p + n * .003, o, 14.);\n  vec3 c = vec3(1., .43, .15) * fl * .55 * max(dot(n, ld), 0.) * emit / (1. + 1.2 * d2) * fs;\n  vec3 hv = normalize(ld - rd);\n  c += vec3(1., .5, .2) * fl * gloss * pow(max(dot(n, hv), 0.), 40.) * emit / (1. + 1.2 * d2) * fs;\n  vec3 bo = vec3(0., .4, -.6) - p;\n  float bd = dot(bo, bo);\n  c += vec3(1., .5, .25) * fl * .05 * (.55 + .45 * max(dot(n, normalize(bo)), 0.)) / (1. + .35 * bd);\n  c += vec3(.013, .013, .016) * (.6 + .4 * n.y);\n  if (MOON > 0.) {\n    vec3 ML = normalize(vec3(-.84, .52, -.12));\n    float nm = max(dot(n, ML), 0.);\n    if (nm > 0.) {\n      float tw = (-2.4 - p.x) / ML.x;\n      vec2 w = vec2(p.z + ML.z * tw, p.y + ML.y * tw);\n      vec2 wc = w - vec2(-1.27, 1.5);\n      float m = smoothstep(.04, 0., max(abs(wc.x) - .4, abs(wc.y) - .55));\n      m *= smoothstep(.012, .03, abs(wc.x)) * smoothstep(.012, .03, abs(wc.y)) *\n           smoothstep(.01, .025, abs(wc.y - .28)) * smoothstep(.01, .025, abs(wc.y + .28));\n      if (m > 0.) m *= shadowL(p + n * .003, p + ML * 2.5, 16.);\n      c += vec3(.42, .56, .95) * MOON * .16 * m *\n           (nm + gloss * .8 * pow(max(dot(n, normalize(ML - rd)), 0.), 40.));\n    }\n    c += vec3(.006, .009, .018) * MOON * (.5 + .5 * n.y);\n  }\n  return c;\n}\n",
+ "scene/main.glsl": "// 主程式：光線步進 → 材質 → 打光 → 體積火焰與煙 → 輸出\nvoid main() {\n  vec2 fc = gl_FragCoord.xy;\n  vec2 uv = ((fc + JIT) / R) * 2. - 1.;\n  vec3 f = normalize(TGT - CAM);\n  vec3 rr = normalize(cross(vec3(0, 1, 0), f));\n  vec3 uu = cross(f, rr);\n  vec3 ro = CAM, rd = normalize(f + uv.x * FT * (R.x / R.y) * rr + uv.y * FT * uu);\n  float t = .05, tl = -1.;\n  vec2 hm = vec2(0.);\n  for (int i = ZERO; i < 128; i++) {\n    vec3 p = ro + rd * t;\n    hm = map(p);\n    if (abs(hm.x) < .0005 * t) {\n      tl = t;\n      break;\n    }\n    t += hm.x * .85;\n    if (t > 14.) break;\n  }\n  vec3 col = vec3(0.);\n  float tEnd = 14.;\n  if (tl > 0.) {\n    tEnd = tl;\n    vec3 p = ro + rd * tl;\n    vec3 n = calcN(p);\n    gFP = tl * FT * 2. / R.y / max(abs(dot(n, rd)), .25);\n    vec3 A, E;\n    float G = 0.;\n    bool inside = false;\n    if (hm.y < 4.5) {\n      matLog(p, hm.y, n, A, E);\n      inside = true;\n    } else if (hm.y > 16.5) {\n      matLog(p, 5., n, A, E);\n      inside = true;\n    } else if (hm.y < 5.5 && p.z > .004 && abs(p.x) < .505 && p.y < HP + .14) {\n      matInterior(p, n, A, E);\n      inside = true;\n    } else\n      matExt(p, n, hm.y, A, E, G);\n    if (inside)\n      col = A * lightIn(p, n, shadow(p + n * .004, LP())) + E;\n    else\n      col = A * lightRoom(p, n, rd, G) + E;\n  }\n  vec3 bmin = vec3(-.48, .03, .0), bmax = vec3(.48, HP + .3, .46);\n  vec3 i0 = (bmin - ro) / rd, i1 = (bmax - ro) / rd;\n  vec3 mn = min(i0, i1), mx = max(i0, i1);\n  float tn = max(max(mn.x, mn.y), mn.z), tf = min(min(min(mx.x, mx.y), mx.z), tEnd);\n  vec3 e = vec3(0.);\n  float tr = 1.;\n  if (tf > tn && tf > 0.) {\n    tn = max(tn, 0.);\n    float dt = (tf - tn) / STEPS;\n    float s = tn + dt * h1(fc * .731 + fract(T * 7.31) * vec2(13., 7.));\n    int NS = int(STEPS);\n    for (int i = ZERO; i < NS; i++) {\n      vec3 pp = ro + rd * s;\n      vec2 q = fireAt(pp);\n      if (q.x > 0.) {\n        float k = q.y;\n        vec3 c = vec3(1., .1 + .62 * k, .02 + .32 * k * k) * (.18 + 3.6 * k * k * k);\n        e += c * q.x * dt * tr * 19.;\n        tr *= exp(-q.x * dt * .8);\n      } else if (SMK > 0. && pp.y > .22 && pp.z > .04) {\n        vec3 sp = pp * vec3(6., 2.6, 6.) + vec3(0., -T * .55, T * .05);\n        float sw = n3(sp * .5 + vec3(0., 0., T * .1));\n        float sd = n3(sp + vec3(sw * 2., 0., 0.)) * .65 + n3(sp * 2.3) * .35;\n        float env = exp(-pp.x * pp.x / (.04 + .25 * (pp.y - .22))) * smoothstep(.22, .38, pp.y);\n        float dn = max(sd - .5, 0.) * env * SMK * (.4 + .6 * I) * 2.2;\n        if (dn > 0.) {\n          vec3 sc = vec3(.32, .17, .09) * I * exp(-(pp.y - .25) * 4.) + vec3(.012, .011, .011);\n          e += sc * dn * dt * tr * 18.;\n          tr *= exp(-dn * dt * 16.);\n        }\n      }\n      s += dt;\n      if (s > tf) break;\n    }\n  }\n  col = col * tr + e;\n  col = max(col, 0.);\n  if (any(isnan(col)) || any(isinf(col))) col = vec3(0.);\n  o = vec4(enc(col), 1.);\n}\n",
+ "scene/materials.glsl": "// 材質：只決定反照率 A、自發光 E、光澤 G，打光統一在 main 做一次\n// （避免陰影迴圈在程式碼裡被複製多份，ANGLE/D3D 編譯會爆量）\nvec3 bricks(vec2 uv, float s) {\n  vec2 bp = uv * vec2(1. / .21, 1. / .068);\n  float row = floor(bp.y);\n  bp.x += mod(row, 2.) * .5;\n  vec2 f = fract(bp);\n  float ex = max(.035, 1.2 * gFP / .21), ey = max(.1, 1.2 * gFP / .068);\n  float g = smoothstep(0., ex, f.x) * smoothstep(1., 1. - ex, f.x) * smoothstep(0., ey, f.y) *\n            smoothstep(1., 1. - ey, f.y);\n  g = mix(g, .85, smoothstep(.4, 1., gFP / .068 * 4.));\n  vec3 b = vec3(.36, .12, .065) * (.6 + .55 * h1(floor(bp))) * s;\n  return mix(vec3(.05, .042, .036), b, g) * (1. + (.2 * noise(uv * 70.) - .1) * df(70.)) *\n         (1. + (.24 * noise(uv * 300.) - .12) * df(300.));\n}\nvoid matLog(vec3 p, float fid, vec3 n, out vec3 A, out vec3 E) {\n  vec3 a, b;\n  float r;\n  int id = int(fid + .5);\n  logDef(id, a, b, r);\n  float ch = id == 5 ? NL.z : 1.;\n  vec3 ba = b - a;\n  float len = length(ba);\n  vec3 dir = ba / len;\n  float al = dot(p - a, dir);\n  vec3 rel = p - a - dir * al;\n  vec3 u = normalize(cross(dir, vec3(0, 1, 0)));\n  vec3 v = cross(u, dir);\n  float ang = atan(dot(rel, v), dot(rel, u));\n  float rad = length(rel) / r;\n  vec3 hp = (p - vec3(0., .15, .22)) * vec3(2.6, 3.6, 4.);\n  float hf = exp(-dot(hp, hp));\n  float down = clamp(.5 - .6 * n.y, 0., 1.);\n  A = vec3(0.);\n  E = vec3(0.);\n  if (al < .008 || al > len - .008) {\n    vec3 vr = voro(vec2(rad * 6., ang * 2.5 + fid * 5.));\n    float rings = .5 + .5 * sin(rad * 38. + noise(vec2(ang * 3., rad * 8.)) * 4.);\n    vec3 alb = mix(vec3(.05, .03, .018), vec3(.11, .065, .035), rings) * (1. - .6 * smoothstep(.55, 1., rad));\n    if (ch < .6) alb = mix(vec3(.33, .24, .14) * (.8 + .2 * rings), alb, ch / .6);\n    A = alb;\n    float rim = smoothstep(.75, 1., rad) * hf * ch;\n    E = ember(rim * (.6 + .6 * noise(vec2(ang * 4., T * .5)))) * (1. - smoothstep(0., .06, vr.x)) * 1.4 +\n        ember(rim * .35) * .4;\n  } else {\n    vec2 sc = vec2(al * .75, ang * r) / (r * .55) + fid * 7.;\n    sc += (vec2(noise(sc * .7), noise(sc * .7 + 9.)) - .5) * .9;\n    vec3 vr = voro(sc);\n    float edge = vr.x;\n    float bump = smoothstep(.02, .3, edge);\n    float tn = noise(vec2(vr.y * 50. + T * (.25 + .5 * vr.z), vr.z * 30.));\n    float heat =\n        hf * (.25 + .95 * down) * (.3 + .9 * tn) * (.65 + .35 * I + .35 * FL) * ch * mix(.55, 1., FUEL);\n    float crack = 1. - smoothstep(0., .03 + .12 * heat * heat, edge);\n    vec3 alb = vec3(.03, .025, .022) * (.35 + .9 * bump) * (.75 + .5 * noise(sc * vec2(5., 1.3)));\n    alb +=\n        vec3(.16, .15, .14) * smoothstep(.82 - .35 * (1. - FUEL), .97, vr.z) * smoothstep(.1, .6, n.y) * bump;\n    vec3 bark = vec3(.16, .1, .06) * (.55 + .6 * noise(vec2(al * 30., ang * 6.))) *\n                (.7 + .5 * noise(vec2(al * 4., ang * 20.)));\n    alb = mix(bark, alb, smoothstep(0., .6, ch));\n    A = alb * (.5 + .5 * bump);\n    E = ember(heat * 1.3) * crack * 1.6 +\n        ember(heat * .45) * smoothstep(.6, .95, tn) * down * (1. - bump * .6) * .6;\n  }\n}\nvoid matInterior(vec3 p, vec3 n, out vec3 A, out vec3 E) {\n  E = vec3(0.);\n  if (n.y > .7) {\n    vec2 uv = p.xz;\n    vec3 alb = vec3(.085, .08, .075) * (.55 + .7 * noise(uv * 35.)) *\n               (.7 + .3 * mix(.5, noise(uv * 180.), df(180.)));\n    vec2 ep = uv * 17.;\n    ep += (vec2(noise(ep * .5), noise(ep * .5 + 5.)) - .5) * 1.3;\n    vec3 v = voro(ep);\n    float lump = smoothstep(0., .22, v.x);\n    vec2 dq = vec2(p.x / .3, (p.z - .23) / .15);\n    float hx = exp(-dot(dq, dq));\n    float ht = hx * (.35 + .8 * noise(vec2(v.y * 40., T * .35 + v.z * 9.))) * (.65 + .35 * I + .3 * FL);\n    float coal = step(.25, hx * (.4 + v.z));\n    A = mix(alb, vec3(.02, .017, .015) * (.5 + lump), coal);\n    E = coal * (ember(ht * 1.2) * (1. - lump) * 1.3 + ember(ht * .4) * lump * .3);\n    return;\n  }\n  vec2 uv = abs(n.z) > .6 ? p.xy : vec2(p.z * sign(p.x), p.y);\n  vec3 alb = bricks(uv, .7);\n  float soot = smoothstep(.0, .42, p.y) * (.7 + .3 * smoothstep(.5, .0, abs(p.x)));\n  alb *= mix(1., .1, soot);\n  if (n.y < -.4) alb *= .1;\n  A = alb;\n}\nvoid matExt(vec3 p, vec3 n, float m, out vec3 A, out vec3 E, out float G) {\n  E = vec3(0.);\n  if (m > 15.5) { // 掛畫\n    vec2 q = (p.xy - vec2(0., MY + .36)) / vec2(.34, .21);\n    float fr = step(.86, max(abs(q.x), abs(q.y) * 1.08));\n    if (fr > .5 || n.z > -.5) {\n      vec3 alb = vec3(.22, .14, .06) * (.7 + .4 * noise(q * vec2(40., 3.)));\n      {\n        A = alb;\n        G = .5;\n        return;\n      }\n    }\n    vec2 u = q * .5 + .5;\n    vec3 sky = mix(vec3(.55, .35, .25), vec3(.12, .16, .28), u.y);\n    float hill = .45 + .12 * sin(u.x * 5. + 1.) + .05 * sin(u.x * 13.);\n    float hill2 = .3 + .08 * sin(u.x * 4. + 3.);\n    vec3 alb = sky;\n    alb = mix(alb, vec3(.15, .2, .14), step(u.y, hill));\n    alb = mix(alb, vec3(.08, .12, .08), step(u.y, hill2));\n    alb += vec3(.6, .45, .2) * exp(-dot(u - vec2(.7, .62), u - vec2(.7, .62)) * 400.);\n    alb *= .8 + .25 * mix(.5, noise(u * vec2(120., 60.)), df(180.));\n    {\n      A = alb;\n      G = .1;\n      return;\n    }\n  }\n  if (m > 14.5) { // 備用柴\n    if (abs(n.z) > .75) {\n      float rr = fract(length(p.xy - vec2(floor((p.x - .93) / .135) * .135 + 1., 0.)) * 90.);\n      vec3 alb = vec3(.4, .28, .16) * (.75 + .25 * rr);\n      {\n        A = alb;\n        G = 0.;\n        return;\n      }\n    }\n    vec3 alb = vec3(.14, .07, .032) * (.55 + .6 * noise(vec2(p.z * 6., atan(p.y, p.x) * 40. + p.x * 30.))) *\n               (.7 + .4 * mix(.5, noise(p.xy * 90.), df(90.)));\n    {\n      A = alb;\n      G = .05;\n      return;\n    }\n  }\n  if (m > 13.5) {\n    A = vec3(.04, .12, .13) * (.9 + .1 * noise(p.xy * 50.));\n    G = 1.5;\n    return;\n  }\n  if (m > 11.5) { // 地毯\n    vec2 q = vec2(p.x / .9, (p.z + .98) / .46);\n    float b = max(abs(q.x), abs(q.y));\n    vec3 alb = vec3(.32, .06, .05);\n    if (b > .9)\n      alb = vec3(.1, .08, .12);\n    else if (b > .82)\n      alb = vec3(.55, .45, .3);\n    else {\n      vec2 g = fract(q * vec2(4., 2.)) - .5;\n      float dm = abs(g.x) + abs(g.y);\n      alb = mix(alb, vec3(.55, .45, .3), smoothstep(.36, .33, dm) * smoothstep(.27, .3, dm));\n      alb = mix(alb, vec3(.08, .1, .18), smoothstep(.15, .12, dm));\n    }\n    alb *= .75 + .35 * mix(.5, noise(p.xz * 400.), df(400.));\n    {\n      A = alb;\n      G = 0.;\n      return;\n    }\n  }\n  if (m > 10.5) {\n    vec3 alb = vec3(.025, .024, .023);\n    {\n      A = alb;\n      G = 2.5;\n      return;\n    }\n  }              // 鐵柵欄\n  if (m > 9.5) { // 木壁爐台\n    vec3 alb = vec3(.2, .1, .05) *\n               (.65 + .45 * mix(.5, noise(vec2(p.x * 3., (p.y + p.z) * 160.)), df(160.))) *\n               (.85 + .2 * noise(p.xz * 50.));\n    {\n      A = alb;\n      G = .4;\n      return;\n    }\n  }\n  if (m > 8.5) { // 磚牆\n    vec3 alb = bricks(p.xy + vec2(.07, 0.), .85);\n    {\n      A = alb;\n      G = .03;\n      return;\n    }\n  }\n  if (m > 7.5) { // 木地板\n    vec2 uv = vec2(p.x, p.z);\n    float pl = floor(uv.y / .13);\n    float off = h1(vec2(pl, 3.)) * 3.;\n    float seamZ =\n        smoothstep(0., .006, fract(uv.y / .13) * .13) * smoothstep(.13, .124, fract(uv.y / .13) * .13);\n    float seg = floor((uv.x + off) / 1.1);\n    float seamX = smoothstep(0., .004, fract((uv.x + off) / 1.1) * 1.1);\n    float grain = noise(vec2(uv.x * 3. + off, uv.y * 80.)) * .5 * df(80.) + .25 * (1. - df(80.)) +\n                  mix(.25, noise(vec2(uv.x * 20., uv.y * 300.)) * .5, df(300.));\n    vec3 alb = vec3(.26, .14, .07) * (.6 + .6 * h1(vec2(pl, seg))) * (.75 + .45 * grain) * seamZ * seamX;\n    {\n      A = alb;\n      G = .35;\n      return;\n    }\n  }\n  if (m > 6.5) { // 石板爐床\n    float sl = floor((p.x + 1.) / .4);\n    float seam = smoothstep(0., .005, fract((p.x + 1.) / .4) * .4);\n    vec3 alb = vec3(.27, .25, .23) * (.75 + .35 * h1(vec2(sl, 1.))) * (.8 + .3 * noise(p.xz * 40.)) *\n               mix(1., seam, step(.5, n.y));\n    {\n      A = alb;\n      G = .15;\n      return;\n    }\n  }\n  if (m > 5.5) { // 金屬爐框\n    vec3 alb = vec3(.16, .155, .15) * (.85 + .15 * mix(.5, noise(p.xy * vec2(200., 8.)), df(200.)));\n    float inner = smoothstep(.06, 0., max(abs(p.x) - .5, max(p.y - HP, 0.)));\n    A = alb;\n    G = 1.2;\n    E = vec3(1., .4, .12) * inner * .08 * I;\n    return;\n  }\n  vec2 uv = abs(n.z) > .6 ? p.xy : (abs(n.x) > .6 ? vec2(p.z, p.y) : p.xz);\n  vec3 alb = bricks(uv + vec2(.3, .0), 1.);\n  vec2 sq = vec2(p.x / .45, (p.y - HP - .12) / .15);\n  alb *= 1. - .55 * exp(-dot(sq, sq)) * step(.6, abs(n.z));\n  {\n    A = alb;\n    G = .05;\n    return;\n  }\n}\n",
+ "scene/noise.glsl": "// 雜訊與共用小工具：3D 值雜訊、fbm、Voronoi、炭火色\nfloat h13(vec3 p) {\n  p = fract(p * .3183099 + .1);\n  p *= 17.;\n  return fract(p.x * p.y * p.z * (p.x + p.y + p.z));\n}\nfloat n3(vec3 x) {\n  vec3 i = floor(x), f = fract(x);\n  f = f * f * (3. - 2. * f);\n  return mix(mix(mix(h13(i), h13(i + vec3(1, 0, 0)), f.x),\n                 mix(h13(i + vec3(0, 1, 0)), h13(i + vec3(1, 1, 0)), f.x), f.y),\n             mix(mix(h13(i + vec3(0, 0, 1)), h13(i + vec3(1, 0, 1)), f.x),\n                 mix(h13(i + vec3(0, 1, 1)), h13(i + vec3(1, 1, 1)), f.x), f.y),\n             f.z);\n}\nfloat fbm3(vec3 p) {\n  float v = 0., a = .5;\n  for (int i = ZERO; i < 4; i++) {\n    v += a * n3(p);\n    p = p * 2.03 + vec3(1.3, 7.1, 4.7);\n    a *= .5;\n  }\n  return v;\n}\nvec3 voro(vec2 x) {\n  vec2 n = floor(x), f = fract(x);\n  float d1 = 8., d2 = 8.;\n  vec2 id = vec2(0);\n  for (int j = -1 + ZERO; j <= 1; j++)\n    for (int i = -1 + ZERO; i <= 1; i++) {\n      vec2 g = vec2(i, j);\n      vec2 o = h2(n + g) * .8 + .1;\n      vec2 r = g + o - f;\n      float d = dot(r, r);\n      if (d < d1) {\n        d2 = d1;\n        d1 = d;\n        id = n + g;\n      } else if (d < d2)\n        d2 = d;\n    }\n  return vec3(sqrt(d2) - sqrt(d1), h1(id), h1(id + 7.7));\n}\nvec3 ember(float t) {\n  t = clamp(t, 0., 2.);\n  return vec3(1., .15 + .42 * t, .02 + .16 * t * t) * t;\n}\n",
+ "scene/sdf.glsl": "// 場景幾何（距離場）\n// 材質編號：0-4 火堆木柴, 5 爐體, 6 金屬框, 7 爐床, 8 地板, 9 磚牆,\n//           10 壁爐台, 11 柵欄, 12 地毯, 14 花瓶, 15 備用柴, 16 掛畫, 17 新添的木柴\nfloat sdBox(vec3 p, vec3 b) {\n  vec3 q = abs(p) - b;\n  return length(max(q, 0.)) + min(max(q.x, max(q.y, q.z)), 0.);\n}\nvoid logDef(int i, out vec3 a, out vec3 b, out float r) {\n  if (i == 0) {\n    a = vec3(-.4, .085, .35);\n    b = vec3(.41, .095, .32);\n    r = .08;\n  } else if (i == 1) {\n    a = vec3(-.37, .072, .1);\n    b = vec3(.35, .068, .13);\n    r = .07;\n  } else if (i == 2) {\n    a = vec3(-.3, .075, .04);\n    b = vec3(.12, .22, .36);\n    r = .058;\n  } else if (i == 3) {\n    a = vec3(.31, .072, .05);\n    b = vec3(-.1, .23, .35);\n    r = .056;\n  } else if (i == 4) {\n    a = vec3(-.17, .215, .2);\n    b = vec3(.21, .19, .25);\n    r = .046;\n  } else {\n    a = vec3(-.3, .3 + NL.y, .16);\n    b = vec3(.31, .285 + NL.y, .22);\n    r = .058 * mix(.65, 1., NL.w);\n    return;\n  }\n  float sh = mix(.6, 1., FUEL);\n  float dy = (1. - FUEL) * r * .45;\n  r *= sh;\n  a.y -= dy;\n  b.y -= dy;\n}\nfloat sdCyl(vec3 p, vec3 a, vec3 b, float r) {\n  vec3 ba = b - a, pa = p - a;\n  float baba = dot(ba, ba), paba = dot(pa, ba);\n  float x = length(pa * baba - ba * paba) - r * baba, y = abs(paba - baba * .5) - baba * .5;\n  float x2 = x * x, y2 = y * y * baba;\n  float d = (max(x, y) < 0.) ? -min(x2, y2) : (((x > 0.) ? x2 : 0.) + ((y > 0.) ? y2 : 0.));\n  return sign(d) * sqrt(abs(d)) / baba;\n}\nfloat cavity(vec3 p) {\n  float zc = max(p.z, 0.);\n  return max(max(-p.y, p.y - (HP + .25 * zc)), max(abs(p.x) - (.5 - .3 * zc), max(-(p.z + .4), p.z - .46)));\n}\n#define MY .93\nfloat sdVC(vec3 p, float r, float h) {\n  vec2 d = vec2(length(p.xz) - r, abs(p.y - h * .5) - h * .5);\n  return min(max(d.x, d.y), 0.) + length(max(d, 0.));\n}\nvec2 map(vec3 p) {\n  vec2 res = vec2(p.y + .09, 8.);\n  float w = SD - .02 - p.z;\n  if (w < res.x) res = vec2(w, 9.);\n  float mass = sdBox(p - vec3(0., 1.45, SD * .5 - .02), vec3(SW, 1.54, SD * .5)) - .006;\n  float cav = cavity(p);\n  float sur = max(mass, -cav);\n  if (sur < res.x) res = vec2(sur, 5.);\n  float fr = max(sdBox(p - vec3(0., HP * .5, -.03), vec3(.56, HP * .5 + .05, .018)) - .004, -cav);\n  if (fr < res.x) res = vec2(fr, 6.);\n  float hr = sdBox(p - vec3(0., -.05, -.12), vec3(SW + .08, .04, .16)) - .004;\n  if (hr < res.x) res = vec2(hr, 7.);\n  float mt = sdBox(p - vec3(0., MY, .04), vec3(SW + .1, .03, .14)) - .008;\n  if (mt < res.x) res = vec2(mt, 10.);\n  float db = sdBox(p - vec3(0., MY + .3, -.04), vec3(SW, .3, .1));\n  if (db < res.x) {\n    vec3 q = p - vec3(.5, MY + .038, .0);\n    float body = (length((q - vec3(0., .085, 0.)) / vec3(.068, .09, .068)) - 1.) * .06;\n    float neck = sdVC(q - vec3(0., .14, 0.), .026, .09);\n    float vs = min(body, neck) - .002;\n    vs = max(vs, -sdVC(q - vec3(0., .17, 0.), .02, .1));\n    if (vs < res.x) res = vec2(vs, 14.);\n    float pic = sdBox(p - vec3(0., MY + .36, -.034), vec3(.34, .21, .012)) - .003;\n    if (pic < res.x) res = vec2(pic, 16.);\n  }\n  float sb = sdBox(p - vec3(0., .14, -.18), vec3(.63, .17, .1));\n  if (sb < res.x) {\n    // 弧形柵欄：圓心在爐內，半徑 FR\n    const float FR = 1.131, FZ = .871, HA = .54;\n    vec2 dd = p.xz - vec2(0., FZ);\n    float rr = length(dd);\n    float an = atan(dd.x, -dd.y);\n    float sa = an * FR, dr = rr - FR, y = p.y;\n    float lim = abs(an) - HA;\n    float bx = sa - .045 * clamp(floor(sa / .045 + .5), -13., 13.);\n    float bars = max(length(vec2(bx, dr)) - .0055, abs(y - .125) - .135);\n    float r1 = max(length(vec2(y - .235, dr)) - .01, lim * FR);\n    float r2 = max(length(vec2(y - .045, dr)) - .008, lim * FR);\n    float ft = max(max(abs(dr) - .03, abs(y + .004) - .006), lim * FR - .01);\n    float fin = max(length(vec3(bx, y - .27, dr)) - .012, lim * FR);\n    float scr = min(min(bars, min(r1, r2)), min(ft, fin)) * .9;\n    if (scr < res.x) res = vec2(scr, 11.);\n  }\n  float rg = sdBox(p - vec3(0., -.087, -.98), vec3(.9, .004, .46)) - .002;\n  if (rg < res.x) res = vec2(rg, 12.);\n  float wb = sdBox(p - vec3(1.16, .12, -.12), vec3(.25, .24, .25));\n  if (wb < res.x) {\n    for (int i = ZERO; i < 6; i++) {\n      float fi = float(i);\n      vec2 c = i < 3 ? vec2(1.0 + fi * .135, -.025)\n                     : (i < 5 ? vec2(1.07 + (fi - 3.) * .135, .095) : vec2(1.135, .21));\n      float rr = .062 + .006 * sin(fi * 3.7);\n      float d = sdCyl(p, vec3(c.x, c.y, -.32 + .03 * sin(fi * 2.1)),\n                      vec3(c.x, c.y, .06 - .03 * cos(fi * 1.3)), rr - .006) -\n                .006;\n      if (d < res.x) res = vec2(d, 15.);\n    }\n  }\n  float fb = sdBox(p - vec3(0., .17 + max(NL.y, 0.) * .5, .22), vec3(.5, .22 + max(NL.y, 0.) * .5, .28));\n  if (fb < res.x) {\n    for (int i = ZERO; i < 5; i++) {\n      vec3 a, b;\n      float r;\n      logDef(i, a, b, r);\n      float d = sdCyl(p, a, b, r - .01) - .01;\n      d -= .003 * sin(p.x * 70. + p.z * 55.) * sin(p.y * 60. + p.x * 20.);\n      if (d < res.x) res = vec2(d, float(i));\n    }\n    if (NL.x > .5) {\n      vec3 a, b;\n      float r;\n      logDef(5, a, b, r);\n      float d = sdCyl(p, a, b, r - .01) - .01;\n      if (d < res.x) res = vec2(d, 17.);\n    }\n  }\n  return res;\n}\nvec3 calcN(vec3 p) {\n  vec3 n = vec3(0.);\n  for (int i = ZERO; i < 4; i++) {\n    vec3 e = .5773 * (2. * vec3(float(((i + 3) >> 1) & 1), float((i >> 1) & 1), float(i & 1)) - 1.);\n    n += e * map(p + .0012 * e).x;\n  }\n  return normalize(n);\n}\n",
+ "scene/uniforms.glsl": "// 場景著色器：輸出、uniform 與全域常數\n// HP 爐口高度、SW 爐體半寬、SH 爐體高、SD 爐體深度（單位：爐口寬）\nout vec4 o;\nuniform int ZERO;\nuniform vec2 R, JIT;\nuniform float T, I, FL, FT, FUEL, STEPS, MOON, SMK;\nuniform vec3 CAM, TGT;\nuniform vec4 NL;\nfloat gFP = .001;\nfloat df(float fr) {\n  return smoothstep(.45, .12, fr * gFP);\n}\n#define HP .6\n#define SW .74\n#define SH 1.12\n#define SD .34\n"
+};
+// ---- src/js/util.js ----
+// 共用小工具：亂數、1D 值雜訊、向量運算、視窗尺寸、畫面訊息
+
+const rnd = Math.random;
+
+const NOISE_TABLE = new Float32Array(512);
+for (let i = 0; i < 512; i++) NOISE_TABLE[i] = rnd();
+
+/** 平滑的 1D 值雜訊，回傳 0..1 */
+function vnoise(x) {
+  const i = Math.floor(x);
+  const f = x - i;
+  const u = f * f * (3 - 2 * f);
+  const a = NOISE_TABLE[i & 511];
+  const b = NOISE_TABLE[(i + 1) & 511];
+  return a + (b - a) * u;
+}
+
+const vsub = (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+const vdot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+const vcross = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+const vnorm = (a) => {
+  const l = Math.hypot(a[0], a[1], a[2]);
+  return [a[0] / l, a[1] / l, a[2] / l];
+};
+
+/** 目前視窗的 CSS 尺寸與裝置像素比 */
+const view = { W: 0, H: 0, dpr: 1 };
+
+/** 在畫面中央顯示一行訊息；傳空字串則隱藏 */
+function showMessage(text) {
+  let el = document.getElementById('msg');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'msg';
+    document.body.appendChild(el);
+  }
+  el.textContent = text;
+  el.hidden = !text;
+}
+
+// ---- src/js/settings.js ----
+// 使用者設定（畫質、自然燃燒、鏡頭晃動、雨聲會記在這台瀏覽器；睡眠計時不記）
+
+/** cap：解析度倍率上限（相對 devicePixelRatio）、scale：預設渲染比例、steps：火焰取樣數 */
+const QUALITY = {
+  low: { cap: 1, scale: 0.55, steps: 22 },
+  mid: { cap: 1.5, scale: 0.75, steps: 30 },
+  high: { cap: 2, scale: 1, steps: 40 },
+};
+
+const settings = { quality: 'mid', burn: false, sway: true, rain: false, sleep: 0 };
+
+const STORAGE_KEY = 'fireplace-settings';
+
+try {
+  const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}');
+  for (const k of ['quality', 'burn', 'sway', 'rain']) if (k in saved) settings[k] = saved[k];
+  if (!QUALITY[settings.quality]) settings.quality = 'mid';
+} catch (e) {
+  /* 沒有 localStorage 也沒關係 */
+}
+
+function saveSettings() {
+  try {
+    const { quality, burn, sway, rain } = settings;
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({ quality, burn, sway, rain }));
+  } catch (e) {
+    /* 忽略 */
+  }
+}
+
+// ---- src/js/camera.js ----
+// 鏡頭：從左前方略高處斜看壁爐，可拖曳轉動，可選擇緩慢晃動
+
+
+
+/** 場景單位：1 = 爐口寬。yaw/pitch 為角度 */
+const CAMERA_BASE = { yaw: 34, pitch: 17, dist: 2.75, target: [0.06, 0.55, 0.0] };
+
+const camera = {
+  pos: [0, 0, 0],
+  target: CAMERA_BASE.target,
+  tanHalfFov: 0.4,
+  basis: null,
+  dragYaw: 0,
+  dragPitch: 0,
+};
+
+function updateCamera(t) {
+  let yaw = CAMERA_BASE.yaw + camera.dragYaw;
+  let pitch = CAMERA_BASE.pitch + camera.dragPitch;
+  let dist = CAMERA_BASE.dist;
+  if (settings.sway) {
+    yaw += 0.7 * Math.sin(t * 0.11) + 0.3 * Math.sin(t * 0.27 + 1);
+    pitch += 0.35 * Math.sin(t * 0.17 + 2);
+    dist += 0.025 * Math.sin(t * 0.13);
+  }
+  const y = (yaw * Math.PI) / 180;
+  const p = (pitch * Math.PI) / 180;
+  const tg = camera.target;
+  camera.pos = [
+    tg[0] - dist * Math.sin(y) * Math.cos(p),
+    tg[1] + dist * Math.sin(p),
+    tg[2] - dist * Math.cos(y) * Math.cos(p),
+  ];
+  // 視角會依長寬比放寬，讓壁爐在直向螢幕上也完整入鏡
+  camera.tanHalfFov = Math.max(0.4, 1.25 / (dist * (view.W / view.H)));
+  const f = vnorm(vsub(tg, camera.pos));
+  const r = vnorm(vcross([0, 1, 0], f));
+  camera.basis = { f, r, u: vcross(f, r) };
+}
+
+/** 場景座標 → 螢幕座標 [x, y, 深度]；在鏡頭後方回傳 null */
+function project(pt) {
+  const v = vsub(pt, camera.pos);
+  const z = vdot(v, camera.basis.f);
+  if (z <= 0.05) return null;
+  const A = view.W / view.H;
+  const x = vdot(v, camera.basis.r) / (z * camera.tanHalfFov * A);
+  const y = vdot(v, camera.basis.u) / (z * camera.tanHalfFov);
+  return [(x * 0.5 + 0.5) * view.W, (0.5 - y * 0.5) * view.H, z];
+}
+
+/** 爐膛內的點若被爐口上緣或兩側擋住就看不到 */
+function isVisibleThroughOpening(pt) {
+  if (pt[2] <= 0) return true;
+  const c = camera.pos;
+  const v = vsub(pt, c);
+  const k = (0 - c[2]) / v[2];
+  const x = c[0] + v[0] * k;
+  const y = c[1] + v[1] * k;
+  return Math.abs(x) < 0.5 && y > 0 && y < 0.6;
+}
+
+// ---- src/js/shaders.js ----
+// 讀取著色器原始碼。開發時從 src/shaders/ 讀檔；打包成單一檔案時改用內嵌的 INLINE_SHADERS。
+
+const SCENE_PARTS = ['uniforms', 'noise', 'sdf', 'lighting', 'materials', 'fire', 'main'].map((n) => `scene/${n}.glsl`);
+const FILES = [
+  'common.glsl',
+  'fullscreen.vert',
+  ...SCENE_PARTS,
+  'post/bright.frag',
+  'post/blur.frag',
+  'post/accumulate.frag',
+  'post/composite.frag',
+];
+
+async function readShader(path) {
+  if (typeof INLINE_SHADERS !== 'undefined') return INLINE_SHADERS[path];
+  const res = await fetch(new URL(`../shaders/${path}`, location.href));
+  if (!res.ok) throw new Error(`讀不到著色器 ${path}`);
+  return res.text();
+}
+
+/** 回傳各程式的完整原始碼：{ vert, scene, bright, blur, accumulate, composite } */
+async function loadShaders() {
+  const src = Object.fromEntries(await Promise.all(FILES.map(async (f) => [f, await readShader(f)])));
+  const common = src['common.glsl'];
+  return {
+    vert: src['fullscreen.vert'],
+    scene: common + SCENE_PARTS.map((p) => src[p]).join('\n'),
+    bright: common + src['post/bright.frag'],
+    blur: common + src['post/blur.frag'],
+    accumulate: common + src['post/accumulate.frag'],
+    composite: common + src['post/composite.frag'],
+  };
+}
+
+// ---- src/js/renderer.js ----
+// WebGL2 渲染管線：場景（光線步進）→ 時間累積 → 光暈（兩層）→ 合成到畫面
+
+
+
+
+let gl = null;
+let canvas = null;
+let programs = null;
+let targets = {};
+let useHalfFloat = false;
+let frameNo = 0;
+let resetHistory = true;
+
+/** scale：目前的渲染比例（會依流暢度自動調整）；ready：著色器是否編譯完成 */
+const renderer = { scale: QUALITY[settings.quality].scale, ready: false };
+
+const UNIFORMS = {
+  scene: ['ZERO', 'R', 'JIT', 'T', 'I', 'FL', 'FT', 'CAM', 'TGT', 'FUEL', 'STEPS', 'MOON', 'SMK', 'NL'],
+  accumulate: ['S', 'P', 'TX', 'AL'],
+  bright: ['S', 'TX', 'TH'],
+  blur: ['S', 'DIR'],
+  composite: ['S', 'B1', 'B2', 'T', 'R', 'HZ', 'HS'],
+};
+
+/**
+ * 建立 WebGL2 context 並在背景編譯著色器（KHR_parallel_shader_compile），
+ * 編譯完成後呼叫 onReady。
+ */
+function initRenderer(cv, shaders, onReady) {
+  canvas = cv;
+  gl = canvas.getContext('webgl2', {
+    antialias: false,
+    alpha: false,
+    premultipliedAlpha: false,
+    powerPreference: 'high-performance',
+  });
+  if (!gl) {
+    showMessage('這個瀏覽器不支援 WebGL2');
+    return;
+  }
+  useHalfFloat = !!gl.getExtension('EXT_color_buffer_float');
+  const parallel = gl.getExtension('KHR_parallel_shader_compile');
+
+  const compile = (type, src) => {
+    const s = gl.createShader(type);
+    gl.shaderSource(s, src);
+    gl.compileShader(s);
+    return s;
+  };
+  programs = {};
+  for (const name of Object.keys(UNIFORMS)) {
+    const p = gl.createProgram();
+    const fs = compile(gl.FRAGMENT_SHADER, shaders[name]);
+    gl.attachShader(p, compile(gl.VERTEX_SHADER, shaders.vert));
+    gl.attachShader(p, fs);
+    gl.bindAttribLocation(p, 0, 'p');
+    gl.linkProgram(p);
+    programs[name] = { p, fs, u: {} };
+  }
+
+  const quad = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, quad);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
+  gl.enableVertexAttribArray(0);
+  gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+
+  showMessage('正在準備爐火…');
+  const finish = () => {
+    for (const [name, prog] of Object.entries(programs)) {
+      if (!gl.getProgramParameter(prog.p, gl.LINK_STATUS)) {
+        console.error(name, gl.getShaderInfoLog(prog.fs) || gl.getProgramInfoLog(prog.p));
+        showMessage('著色器編譯失敗');
+        return;
+      }
+      for (const u of UNIFORMS[name]) prog.u[u] = gl.getUniformLocation(prog.p, u);
+    }
+    renderer.ready = true;
+    showMessage('');
+    onReady();
+  };
+  const poll = () => {
+    const done = Object.values(programs).every((prog) =>
+      gl.getProgramParameter(prog.p, parallel.COMPLETION_STATUS_KHR),
+    );
+    if (done) finish();
+    else setTimeout(poll, 50);
+  };
+  if (parallel) poll();
+  else setTimeout(finish, 0);
+
+  canvas.addEventListener('webglcontextlost', (e) => {
+    e.preventDefault();
+    renderer.ready = false;
+    showMessage('顯示卡被重置了，請重新整理頁面');
+  });
+}
+
+/** 建立渲染目標；可以的話用 RGBA16F，否則退回 RGBA8 */
+function makeTarget(w, h) {
+  const create = (half) => {
+    const t = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, t);
+    if (half) gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA16F, w, h, 0, gl.RGBA, gl.HALF_FLOAT, null);
+    else gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    const f = gl.createFramebuffer();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, f);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, t, 0);
+    const ok = gl.checkFramebufferStatus(gl.FRAMEBUFFER) === gl.FRAMEBUFFER_COMPLETE;
+    return { t, f, w, h, ok };
+  };
+  let rt = useHalfFloat ? create(true) : null;
+  if (!rt || !rt.ok) {
+    if (rt) freeTarget(rt);
+    useHalfFloat = false;
+    rt = create(false);
+  }
+  return rt;
+}
+
+function freeTarget(rt) {
+  if (!rt) return;
+  gl.deleteTexture(rt.t);
+  gl.deleteFramebuffer(rt.f);
+}
+
+/** 依視窗大小、畫質與目前渲染比例重建畫布和所有渲染目標 */
+function resizeRenderer() {
+  if (!gl || !renderer.ready) return;
+  const s = Math.min(view.dpr, QUALITY[settings.quality].cap) * renderer.scale;
+  canvas.width = Math.max(4, Math.round(view.W * s));
+  canvas.height = Math.max(4, Math.round(view.H * s));
+  for (const rt of Object.values(targets)) freeTarget(rt);
+  const w = canvas.width;
+  const h = canvas.height;
+  const w4 = Math.max(2, w >> 2);
+  const h4 = Math.max(2, h >> 2);
+  const w8 = Math.max(2, w4 >> 1);
+  const h8 = Math.max(2, h4 >> 1);
+  targets = {
+    scene: makeTarget(w, h),
+    history: makeTarget(w, h),
+    historyNext: makeTarget(w, h),
+    bloom1: makeTarget(w4, h4),
+    bloom1Tmp: makeTarget(w4, h4),
+    bloom2: makeTarget(w8, h8),
+    bloom2Tmp: makeTarget(w8, h8),
+  };
+  resetHistory = true;
+}
+
+function pass(prog, target, setUniforms) {
+  gl.useProgram(prog.p);
+  if (target) {
+    gl.bindFramebuffer(gl.FRAMEBUFFER, target.f);
+    gl.viewport(0, 0, target.w, target.h);
+  } else {
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.viewport(0, 0, canvas.width, canvas.height);
+  }
+  setUniforms(prog.u);
+  gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+}
+
+function bindTex(loc, unit, rt) {
+  gl.activeTexture(gl.TEXTURE0 + unit);
+  gl.bindTexture(gl.TEXTURE_2D, rt.t);
+  gl.uniform1i(loc, unit);
+}
+
+function halton(i, base) {
+  let f = 1;
+  let r = 0;
+  while (i > 0) {
+    f /= base;
+    r += f * (i % base);
+    i = Math.floor(i / base);
+  }
+  return r;
+}
+
+/**
+ * 畫一格。
+ * @param {object} f time, intensity, flare, fuel, newLog[4], heat（熱氣扭曲強度）, camMoved（本格鏡頭位移）
+ */
+function renderFrame(f) {
+  if (!gl || !renderer.ready || !targets.scene) return;
+  const P = programs;
+  const T = targets;
+  const t = f.time % 500;
+  frameNo++;
+  // 每格做次像素抖動，交給時間累積平均掉（抗鋸齒）
+  const jx = halton((frameNo % 8) + 1, 2) - 0.5;
+  const jy = halton((frameNo % 8) + 1, 3) - 0.5;
+
+  pass(P.scene, T.scene, (u) => {
+    gl.uniform1i(u.ZERO, 0);
+    gl.uniform2f(u.R, canvas.width, canvas.height);
+    gl.uniform2f(u.JIT, jx, jy);
+    gl.uniform1f(u.T, t);
+    gl.uniform1f(u.I, f.intensity);
+    gl.uniform1f(u.FL, f.flare);
+    gl.uniform1f(u.FT, camera.tanHalfFov);
+    gl.uniform3fv(u.CAM, camera.pos);
+    gl.uniform3fv(u.TGT, camera.target);
+    gl.uniform1f(u.FUEL, f.fuel);
+    gl.uniform1f(u.STEPS, QUALITY[settings.quality].steps);
+    gl.uniform1f(u.MOON, 1);
+    gl.uniform1f(u.SMK, 1);
+    gl.uniform4fv(u.NL, f.newLog);
+  });
+
+  // 鏡頭在動時減少歷史權重，避免殘影
+  const alpha = resetHistory ? 1 : Math.min(1, 0.14 + f.camMoved * 6);
+  resetHistory = false;
+  pass(P.accumulate, T.historyNext, (u) => {
+    bindTex(u.S, 0, T.scene);
+    bindTex(u.P, 1, T.history);
+    gl.uniform2f(u.TX, 1 / T.scene.w, 1 / T.scene.h);
+    gl.uniform1f(u.AL, alpha);
+  });
+  [T.history, T.historyNext] = [T.historyNext, T.history];
+  const cur = T.history;
+
+  pass(P.bright, T.bloom1, (u) => {
+    bindTex(u.S, 0, cur);
+    gl.uniform2f(u.TX, 1 / cur.w, 1 / cur.h);
+    gl.uniform1f(u.TH, 0.35);
+  });
+  pass(P.blur, T.bloom1Tmp, (u) => {
+    bindTex(u.S, 0, T.bloom1);
+    gl.uniform2f(u.DIR, 1.4 / T.bloom1.w, 0);
+  });
+  pass(P.blur, T.bloom1, (u) => {
+    bindTex(u.S, 0, T.bloom1Tmp);
+    gl.uniform2f(u.DIR, 0, 1.4 / T.bloom1.h);
+  });
+  pass(P.bright, T.bloom2, (u) => {
+    bindTex(u.S, 0, T.bloom1);
+    gl.uniform2f(u.TX, 0.5 / T.bloom1.w, 0.5 / T.bloom1.h);
+    gl.uniform1f(u.TH, 0);
+  });
+  pass(P.blur, T.bloom2Tmp, (u) => {
+    bindTex(u.S, 0, T.bloom2);
+    gl.uniform2f(u.DIR, 2 / T.bloom2.w, 0);
+  });
+  pass(P.blur, T.bloom2, (u) => {
+    bindTex(u.S, 0, T.bloom2Tmp);
+    gl.uniform2f(u.DIR, 0, 2 / T.bloom2.h);
+  });
+
+  // 熱氣扭曲區域：把火堆上方投影到畫面上
+  const c0 = project([0, 0.36, 0.2]);
+  const c1 = project([0.32, 0.36, 0.2]);
+  const c2 = project([0, 0.62, 0.18]);
+  let hz = [0.5, 0.5, 0.1, 0.1];
+  if (c0 && c1 && c2) {
+    hz = [
+      c0[0] / view.W,
+      1 - c0[1] / view.H,
+      Math.max(0.01, Math.abs(c1[0] - c0[0]) / view.W),
+      Math.max(0.01, Math.abs(c0[1] - c2[1]) / view.H),
+    ];
+  }
+  pass(P.composite, null, (u) => {
+    bindTex(u.S, 0, cur);
+    bindTex(u.B1, 1, T.bloom1);
+    bindTex(u.B2, 2, T.bloom2);
+    gl.uniform1f(u.T, t);
+    gl.uniform2f(u.R, canvas.width, canvas.height);
+    gl.uniform4fv(u.HZ, hz);
+    gl.uniform1f(u.HS, f.heat);
+  });
+}
+
+// ---- src/js/audio.js ----
+// 即時合成音效（Web Audio）：火焰呼嘯、木柴爆裂、房間殘響、窗外雨聲
+// 所有聲音都是程式即時產生的波形，沒有任何音檔。
+
+
+/** 產生一段雙聲道緩衝區，fill(data, channel) 負責填值 */
+function makeBuffer(ctx, seconds, fill) {
+  const buf = ctx.createBuffer(2, Math.floor(ctx.sampleRate * seconds), ctx.sampleRate);
+  for (let ch = 0; ch < 2; ch++) fill(buf.getChannelData(ch), ch);
+  return buf;
+}
+
+function filter(ctx, type, freq, q) {
+  const f = ctx.createBiquadFilter();
+  f.type = type;
+  f.frequency.value = freq;
+  if (q !== undefined) f.Q.value = q;
+  return f;
+}
+
+function gain(ctx, value) {
+  const g = ctx.createGain();
+  g.gain.value = value;
+  return g;
+}
+
+/** 接到輸出前隨機左右定位（不支援 StereoPanner 時直接接） */
+function connectPanned(ctx, node, dest, pan) {
+  if (ctx.createStereoPanner) {
+    const p = ctx.createStereoPanner();
+    p.pan.value = pan;
+    node.connect(p).connect(dest);
+  } else node.connect(dest);
+}
+
+const audio = {
+  ctx: null,
+  on: false,
+  vol: 0.7,
+  fade: 1, // 睡眠計時淡出
+  rain: false,
+
+  start() {
+    if (this.ctx) {
+      this.ctx.resume();
+      this.on = true;
+      this.setVol();
+      return;
+    }
+    const ctx = (this.ctx = new (window.AudioContext || window.webkitAudioContext)());
+    const sr = ctx.sampleRate;
+
+    // 輸出鏈：master（火） → 壓縮器 → 總音量 → 喇叭
+    this.comp = ctx.createDynamicsCompressor();
+    this.comp.threshold.value = -14;
+    this.comp.ratio.value = 4;
+    this.out = gain(ctx, 0);
+    this.comp.connect(this.out).connect(ctx.destination);
+    this.master = gain(ctx, 1);
+    this.master.connect(this.comp);
+
+    // 房間殘響：即時產生的脈衝響應（越後面越悶）
+    const ir = makeBuffer(ctx, 2.2, (d) => {
+      let lp = 0;
+      for (let i = 0; i < d.length; i++) {
+        const t = i / sr;
+        lp += (rnd() * 2 - 1 - lp) * (0.5 - 0.4 * Math.min(1, t / 1.5));
+        d[i] = lp * Math.exp(-t * 3.2) * (t < 0.012 ? t / 0.012 : 1);
+      }
+    });
+    const conv = ctx.createConvolver();
+    conv.buffer = ir;
+    this.master.connect(conv);
+    conv.connect(gain(ctx, 0.32)).connect(this.comp);
+
+    // 噪音素材
+    const brown = makeBuffer(ctx, 6, (d) => {
+      let last = 0;
+      for (let i = 0; i < d.length; i++) {
+        last = (last + 0.02 * (rnd() * 2 - 1)) / 1.02;
+        d[i] = last * 3.5;
+      }
+    });
+    const white = makeBuffer(ctx, 3, (d) => {
+      for (let i = 0; i < d.length; i++) d[i] = rnd() * 2 - 1;
+    });
+    const pink = makeBuffer(ctx, 4, (d) => {
+      let b0 = 0,
+        b1 = 0,
+        b2 = 0;
+      for (let i = 0; i < d.length; i++) {
+        const w = rnd() * 2 - 1;
+        b0 = 0.997 * b0 + w * 0.029;
+        b1 = 0.985 * b1 + w * 0.032;
+        b2 = 0.95 * b2 + w * 0.048;
+        d[i] = (b0 + b1 + b2 + w * 0.05) * 1.4;
+      }
+    });
+    const loop = (buf) => {
+      const s = ctx.createBufferSource();
+      s.buffer = buf;
+      s.loop = true;
+      s.start(0, rnd() * buf.duration);
+      return s;
+    };
+
+    // 火焰：呼嘯、低頻隆隆、高頻嘶嘶
+    this.roarLP = filter(ctx, 'lowpass', 380, 0.6);
+    this.roarG = gain(ctx, 0.2);
+    loop(brown).connect(this.roarLP).connect(this.roarG).connect(this.master);
+    this.rumG = gain(ctx, 0.25);
+    loop(brown)
+      .connect(filter(ctx, 'lowpass', 110))
+      .connect(this.rumG)
+      .connect(this.master);
+    this.hissG = gain(ctx, 0.012);
+    loop(white)
+      .connect(filter(ctx, 'highpass', 2500))
+      .connect(this.hissG)
+      .connect(this.master);
+
+    // 雨聲：粉紅噪音的沙沙聲＋低頻，雨滴另外即時產生
+    this.rainBus = gain(ctx, 0);
+    this.rainBus.connect(this.comp);
+    loop(pink)
+      .connect(filter(ctx, 'bandpass', 1600, 0.35))
+      .connect(filter(ctx, 'lowpass', 5200))
+      .connect(gain(ctx, 0.55))
+      .connect(this.rainBus);
+    loop(brown)
+      .connect(filter(ctx, 'lowpass', 250))
+      .connect(gain(ctx, 0.25))
+      .connect(this.rainBus);
+
+    this.on = true;
+    this.setVol();
+  },
+
+  stop() {
+    if (!this.ctx) return;
+    this.on = false;
+    this.out.gain.setTargetAtTime(0, this.ctx.currentTime, 0.15);
+  },
+
+  setVol() {
+    if (this.ctx && this.on) this.out.gain.setTargetAtTime(this.vol * this.fade, this.ctx.currentTime, 0.1);
+  },
+
+  /** 每格呼叫：讓聲音跟著火勢（I）與爆燃（flare）變化 */
+  update(I, flare, dt) {
+    if (!this.on) return;
+    const t = this.ctx.currentTime;
+    this.out.gain.setTargetAtTime(this.vol * this.fade, t, 0.3);
+    this.rainBus.gain.setTargetAtTime(this.rain ? 0.3 : 0, t, 0.8);
+    if (this.rain && dt && rnd() < 18 * dt) this.drop();
+    this.roarG.gain.setTargetAtTime(0.12 + 0.28 * I * I + 0.25 * flare, t, 0.06);
+    this.roarLP.frequency.setTargetAtTime(260 + 420 * I + 600 * flare, t, 0.06);
+    this.rumG.gain.setTargetAtTime(0.18 + 0.22 * I, t, 0.1);
+    this.hissG.gain.setTargetAtTime(0.006 + 0.012 * I + 0.03 * flare, t, 0.08);
+  },
+
+  /** 一滴雨打在窗上（偏左邊，窗戶的方向） */
+  drop() {
+    const ctx = this.ctx;
+    const sr = ctx.sampleRate;
+    const n = Math.floor(sr * 0.03);
+    const buf = ctx.createBuffer(1, n, sr);
+    const d = buf.getChannelData(0);
+    const f = 1800 + rnd() * 5000;
+    const dec = sr * (0.002 + rnd() * 0.006);
+    for (let i = 0; i < n; i++)
+      d[i] = (Math.sin((i / sr) * f * 6.283) * 0.6 + (rnd() * 2 - 1) * 0.4) * Math.exp(-i / dec);
+    const src = ctx.createBufferSource();
+    src.buffer = buf;
+    const g = gain(ctx, 0.04 + rnd() * 0.12);
+    src.connect(filter(ctx, 'highpass', 1500)).connect(g);
+    connectPanned(ctx, g, this.rainBus, -0.4 - rnd() * 0.55);
+    src.start(ctx.currentTime + rnd() * 0.02);
+  },
+
+  /** 一次木柴爆裂：每次都即時產生新的波形。s = 0..1 強度 */
+  crackle(s, delay = 0) {
+    if (!this.on) return;
+    const ctx = this.ctx;
+    const sr = ctx.sampleRate;
+    const n = Math.floor(sr * (0.006 + 0.06 * s));
+    const buf = ctx.createBuffer(1, n, sr);
+    const d = buf.getChannelData(0);
+    const clicks = 1 + Math.floor(rnd() * (1 + 7 * s));
+    for (let k = 0; k < clicks; k++) {
+      const st = Math.floor(rnd() * n * 0.75);
+      const amp = (0.3 + rnd() * 0.7) * (k === 0 ? 1 : 0.6);
+      const dec = sr * (0.0002 + rnd() * 0.002);
+      const len = Math.min(n - st, Math.floor(dec * 7));
+      for (let i = 0; i < len; i++) d[st + i] += (rnd() * 2 - 1) * amp * Math.exp(-i / dec);
+    }
+    const src = ctx.createBufferSource();
+    src.buffer = buf;
+    const g = gain(ctx, 0.25 + 0.9 * s);
+    src.connect(filter(ctx, 'bandpass', 900 + rnd() * 4800 * (1 - 0.5 * s), 0.5 + rnd() * 1.2)).connect(g);
+    connectPanned(ctx, g, this.master, (rnd() * 2 - 1) * 0.6);
+    src.start(ctx.currentTime + 0.004 + delay);
+  },
+
+  /** 大爆裂：低沉的「啪」加上一串小爆裂 */
+  pop() {
+    if (!this.on) return;
+    const ctx = this.ctx;
+    const sr = ctx.sampleRate;
+    const n = Math.floor(sr * 0.12);
+    const buf = ctx.createBuffer(1, n, sr);
+    const d = buf.getChannelData(0);
+    const dec = sr * (0.006 + rnd() * 0.01);
+    for (let i = 0; i < n; i++) d[i] = (rnd() * 2 - 1) * Math.exp(-i / dec);
+    const src = ctx.createBufferSource();
+    src.buffer = buf;
+    src
+      .connect(filter(ctx, 'bandpass', 280 + rnd() * 600, 0.9))
+      .connect(gain(ctx, 1.6))
+      .connect(this.master);
+    src.start(ctx.currentTime + 0.004);
+    for (let k = 0; k < 6; k++) this.crackle(0.3 + rnd() * 0.5, 0.02 + rnd() * 0.35);
+  },
+};
+
+// ---- src/js/sparks.js ----
+// 火星粒子：在 3D 場景座標裡模擬，再投影到上層的 2D 畫布
+
+
+
+const MAX_SPARKS = 500;
+const sparks = [];
+
+// 弧形柵欄（和著色器裡的 sdf 一致）：圓心 (0, FENCE_Z)，半徑 FENCE_R，半張角 FENCE_HALF
+const FENCE_R = 1.131;
+const FENCE_Z = 0.871;
+const FENCE_HALF = 0.54;
+const FENCE_TOP = 0.28;
+
+/**
+ * 產生 n 顆火星。
+ * escape：飛出爐口的機率（會受重力落到爐床/地板）；at：起點（預設在火堆上）
+ */
+function spawnSparks(n, power = 1, escape = 0, at) {
+  for (let i = 0; i < n; i++) {
+    const esc = rnd() < escape;
+    const p = at
+      ? [at[0] + (rnd() - 0.5) * 0.5, at[1] + rnd() * 0.05, at[2] + (rnd() - 0.5) * 0.1]
+      : [(rnd() - 0.5) * 0.5, 0.2 + rnd() * 0.12, 0.15 + rnd() * 0.15];
+    const v = esc
+      ? [(rnd() - 0.5) * 0.8, 0.5 + rnd() * 0.9, -(0.7 + rnd() * 0.9)]
+      : [(rnd() - 0.5) * 0.15 * power, (0.25 + rnd() * 0.6) * power, (rnd() - 0.5) * 0.1];
+    sparks.push({
+      p,
+      v,
+      life: 0,
+      max: esc ? 2 + rnd() * 2.5 : 0.7 + rnd() * 1.6,
+      size: 0.6 + rnd() * 1.4,
+      phase: rnd() * 6.28,
+      escape: esc,
+      resting: false,
+    });
+  }
+  if (sparks.length > MAX_SPARKS) sparks.splice(0, sparks.length - MAX_SPARKS);
+}
+
+function stepEscaping(s, dt) {
+  const { p, v } = s;
+  if (s.resting) return;
+  v[1] -= 2.6 * dt;
+  for (let k = 0; k < 3; k++) p[k] += v[k] * dt;
+
+  // 撞到弧形柵欄就彈回
+  const r = Math.hypot(p[0], p[2] - FENCE_Z);
+  const r0 = Math.hypot(p[0] - v[0] * dt, p[2] - v[2] * dt - FENCE_Z);
+  if (r > FENCE_R && r0 <= FENCE_R && p[1] < FENCE_TOP && Math.abs(Math.atan2(p[0], FENCE_Z - p[2])) < FENCE_HALF) {
+    const k = (FENCE_R - 0.002) / r;
+    p[0] *= k;
+    p[2] = FENCE_Z + (p[2] - FENCE_Z) * k;
+    v[0] *= -0.25;
+    v[2] *= -0.25;
+  }
+
+  // 落地：爐膛內底、爐床石板、木地板
+  const onHearth = Math.abs(p[0]) < 0.82 && p[2] > -0.28 && p[2] < 0.04;
+  const groundY = onHearth ? -0.01 : p[2] < 0.04 ? -0.09 : 0;
+  if (p[2] > 0 && p[1] < 0) {
+    p[1] = 0;
+    v[1] *= -0.3;
+  } else if (p[1] < groundY && v[1] < 0) {
+    p[1] = groundY;
+    v[1] *= -0.28;
+    v[0] *= 0.5;
+    v[2] *= 0.5;
+    if (Math.abs(v[1]) < 0.12) s.resting = true;
+  }
+}
+
+/** 往上飄的火星；回傳 false 表示已經飄進煙道 */
+function stepRising(s, t, dt) {
+  const { p, v } = s;
+  v[1] += 0.5 * dt;
+  v[0] += Math.sin(t * 5 + s.phase) * 0.5 * dt;
+  v[0] *= 0.985;
+  for (let k = 0; k < 3; k++) p[k] += v[k] * dt;
+  return p[1] <= 0.62 + 0.25 * Math.max(p[2], 0);
+}
+
+const glowSprite = (() => {
+  const c = document.createElement('canvas');
+  c.width = c.height = 64;
+  const x = c.getContext('2d');
+  const g = x.createRadialGradient(32, 32, 0, 32, 32, 32);
+  g.addColorStop(0, 'rgba(255,200,110,1)');
+  g.addColorStop(0.3, 'rgba(255,110,30,.5)');
+  g.addColorStop(1, 'rgba(255,60,10,0)');
+  x.fillStyle = g;
+  x.fillRect(0, 0, 64, 64);
+  return c;
+})();
+
+function updateAndDrawSparks(ctx, t, dt) {
+  const { W, H, dpr } = view;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, W, H);
+  ctx.globalCompositeOperation = 'lighter';
+  ctx.lineCap = 'round';
+  for (let i = sparks.length - 1; i >= 0; i--) {
+    const s = sparks[i];
+    s.life += dt;
+    if (s.life > s.max) {
+      sparks.splice(i, 1);
+      continue;
+    }
+    if (s.escape) stepEscaping(s, dt);
+    else if (!stepRising(s, t, dt)) {
+      sparks.splice(i, 1);
+      continue;
+    }
+    const { p, v } = s;
+    if (!isVisibleThroughOpening(p)) continue;
+    const a = project(p);
+    if (!a) continue;
+    const b = project([p[0] - v[0] * 0.025, p[1] - v[1] * 0.025, p[2] - v[2] * 0.025]);
+    const heat = 1 - s.life / s.max;
+    const size = Math.max(0.6, ((s.size * 0.006) / (a[2] * camera.tanHalfFov)) * H * 0.5);
+    ctx.strokeStyle = `rgba(255,${(110 + 140 * heat) | 0},${(30 + 120 * heat * heat) | 0},${Math.min(1, heat * 1.5)})`;
+    ctx.lineWidth = size;
+    ctx.beginPath();
+    ctx.moveTo(a[0], a[1]);
+    if (b) ctx.lineTo(b[0], b[1]);
+    else ctx.lineTo(a[0], a[1] + 0.1);
+    ctx.stroke();
+    ctx.globalAlpha = heat * 0.45;
+    const g = size * 5;
+    ctx.drawImage(glowSprite, a[0] - g, a[1] - g, g * 2, g * 2);
+    ctx.globalAlpha = 1;
+  }
+}
+
+// ---- src/js/fire.js ----
+// 火的狀態：爆燃、自然燃燒（柴火量）、新添的木柴、睡眠計時，以及隨機的爆裂事件
+
+
+
+
+
+/** 一次添滿大約燒 12 分鐘 */
+const BURN_SECONDS = 12 * 60;
+/** 睡眠計時最後幾秒開始淡出 */
+const SLEEP_FADE_SECONDS = 150;
+
+const fire = {
+  flare: 0, // 爆燃（添柴、大爆裂時瞬間變旺，會慢慢衰退）
+  fuel: 1, // 柴火剩餘量 0..1（只有自然燃燒開啟時會減少）
+  newLog: { on: false, y: 0, vy: 0, landed: true, age: 1 }, // 新添木柴：掉落高度、速度、炭化程度
+  sleepEnd: 0, // 睡眠計時結束的時間（performance.now），0 = 關閉
+};
+
+/** 添柴：自然燃燒關閉時只是讓火變旺 */
+function addLog() {
+  if (!settings.burn) {
+    fire.flare = Math.min(1.3, fire.flare + 0.6);
+    audio.pop();
+    spawnSparks(40, 1.5, 0.3);
+    return;
+  }
+  fire.fuel = Math.min(1, fire.fuel + 0.5);
+  const log = fire.newLog;
+  if (!log.on || (log.landed && log.age > 0.6)) {
+    fire.newLog = { on: true, y: 0.5, vy: 0, landed: false, age: 0 };
+  } else {
+    fire.flare = Math.min(1.3, fire.flare + 0.4);
+    audio.pop();
+    spawnSparks(25, 1.3, 0.2);
+  }
+}
+
+function updateBurn(dt) {
+  if (!settings.burn) {
+    fire.fuel = 1;
+    fire.newLog.on = false;
+    return;
+  }
+  fire.fuel = Math.max(0, fire.fuel - dt / BURN_SECONDS);
+  const log = fire.newLog;
+  if (!log.on) return;
+  if (!log.landed) {
+    log.vy -= 3.2 * dt;
+    log.y += log.vy * dt;
+    if (log.y <= 0) {
+      log.y = 0;
+      if (log.vy < -0.6) {
+        // 砸進火堆：爆裂聲＋一陣火星＋火變旺，然後小彈一下
+        audio.pop();
+        audio.crackle(0.9);
+        spawnSparks(35, 1.4, 0.35, [0.0, 0.3, 0.19]);
+        fire.flare = Math.min(1.3, fire.flare + 0.7);
+        log.vy *= -0.22;
+      } else {
+        log.vy = 0;
+        log.landed = true;
+      }
+    }
+  }
+  log.age = Math.min(1, log.age + dt / 90); // 大約一分半鐘燒黑
+  if (fire.fuel < 0.12) log.on = false;
+}
+
+/** 睡眠計時的淡出係數 1 → 0 */
+function sleepFade(now) {
+  if (!fire.sleepEnd) return 1;
+  return Math.max(0, Math.min(1, (fire.sleepEnd - now) / 1000 / SLEEP_FADE_SECONDS));
+}
+
+function setSleepTimer(minutes, now) {
+  settings.sleep = minutes;
+  fire.sleepEnd = minutes ? now + minutes * 60000 : 0;
+}
+
+/**
+ * 每格更新火的狀態並觸發隨機事件。
+ * 回傳這一格要給畫面和聲音用的數值。
+ */
+function updateFire(t, dt, now) {
+  updateBurn(dt);
+  const fade = sleepFade(now);
+  const fuelFactor = settings.burn ? 0.08 + 0.92 * Math.pow(fire.fuel, 0.55) : 1;
+  fire.flare *= Math.exp(-dt * 1.3);
+
+  const base = 0.72 + 0.17 * vnoise(t * 0.5) + 0.11 * vnoise(t * 2.2 + 40);
+  const intensity = (base * fuelFactor + 0.15 * fire.flare) * (0.06 + 0.94 * fade);
+  const activity = fuelFactor * fade;
+
+  // 小爆裂：聲音和火星同一個事件
+  if (rnd() < (6 + 6 * intensity) * dt * activity) {
+    const s = rnd() ** 2.2;
+    audio.crackle(s * Math.max(0.3, activity));
+    if (s > 0.25 || rnd() < 0.3) spawnSparks(1 + Math.floor(s * 8 * activity), 0.8 + s, s > 0.6 ? 0.2 : 0);
+  }
+  // 偶爾的大爆裂
+  if (rnd() < 0.09 * dt * activity) {
+    audio.pop();
+    spawnSparks(20 + Math.floor(rnd() * 14), 1.3, 0.35);
+    fire.flare = Math.min(1.2, fire.flare + 0.35);
+  }
+  if (rnd() < 2 * dt * activity) spawnSparks(1, 0.7);
+
+  const log = fire.newLog;
+  return {
+    intensity,
+    fade,
+    fuel: settings.burn ? fire.fuel : 1,
+    newLog: [log.on ? 1 : 0, log.y, log.age, Math.min(1, 0.35 + fire.fuel)],
+    heat: (0.4 + 0.6 * intensity) * fade,
+  };
+}
+
+// ---- src/js/ui.js ----
+// 介面：控制列、設定面板、拖曳轉視角、點擊添柴、閒置自動隱藏
+
+
+
+
+
+
+const $ = (id) => document.getElementById(id);
+let panelOpen = false;
+
+const ensureAudio = () => {
+  if (!audio.ctx) {
+    audio.start();
+    syncSoundButton();
+  }
+};
+const syncSoundButton = () => {
+  $('snd').textContent = audio.on ? '🔊' : '🔇';
+};
+
+/** 面板開著時每格更新柴火量與睡眠倒數 */
+function updatePanel(now) {
+  if (!panelOpen) return;
+  $('fuelRow').hidden = !settings.burn;
+  $('fuelBar').style.width = Math.round(fire.fuel * 100) + '%';
+  let text = '';
+  if (fire.sleepEnd) {
+    const r = Math.max(0, (fire.sleepEnd - now) / 1000);
+    text = r > 0 ? `剩 ${Math.floor(r / 60)}:${String(Math.floor(r % 60)).padStart(2, '0')}` : '已熄滅';
+  }
+  $('sleepLeft').textContent = text;
+}
+
+function syncPanel() {
+  document.querySelectorAll('[data-q]').forEach((b) => b.classList.toggle('on', b.dataset.q === settings.quality));
+  $('optBurn').checked = settings.burn;
+  $('optSway').checked = settings.sway;
+  $('optRain').checked = settings.rain;
+  $('optSleep').value = String(settings.sleep);
+  updatePanel(performance.now());
+}
+
+function setPanel(open) {
+  panelOpen = open;
+  $('panel').hidden = !open;
+  if (open) syncPanel();
+}
+
+/** onQualityChange：畫質改變時要重建渲染目標 */
+function initUI(canvas, { onQualityChange }) {
+  $('gear').onclick = (e) => {
+    e.stopPropagation();
+    setPanel(!panelOpen);
+  };
+  document.querySelectorAll('[data-q]').forEach((b) => {
+    b.onclick = () => {
+      settings.quality = b.dataset.q;
+      renderer.scale = QUALITY[settings.quality].scale;
+      saveSettings();
+      syncPanel();
+      onQualityChange();
+    };
+  });
+  $('optBurn').onchange = (e) => {
+    settings.burn = e.target.checked;
+    if (settings.burn) fire.fuel = 1;
+    saveSettings();
+    syncPanel();
+  };
+  $('optSway').onchange = (e) => {
+    settings.sway = e.target.checked;
+    saveSettings();
+  };
+  $('optRain').onchange = (e) => {
+    settings.rain = e.target.checked;
+    if (settings.rain) ensureAudio();
+    saveSettings();
+  };
+  $('optSleep').onchange = (e) => {
+    setSleepTimer(+e.target.value, performance.now());
+    syncPanel();
+  };
+  $('addLog').onclick = () => {
+    ensureAudio();
+    addLog();
+  };
+  const resetView = () => {
+    camera.dragYaw = 0;
+    camera.dragPitch = 0;
+  };
+  $('resetView').onclick = resetView;
+  $('snd').onclick = () => {
+    audio.on ? audio.stop() : audio.start();
+    syncSoundButton();
+  };
+  $('vol').oninput = (e) => {
+    audio.vol = +e.target.value;
+    audio.setVol();
+  };
+  const toggleFullscreen = () => {
+    if (document.fullscreenElement) document.exitFullscreen();
+    else document.documentElement.requestFullscreen?.().catch(() => {});
+  };
+  $('fs').onclick = toggleFullscreen;
+  addEventListener('keydown', (e) => {
+    if (e.key === 'f' || e.key === 'F') toggleFullscreen();
+  });
+
+  // 拖曳轉視角；沒有拖曳的點擊若點在爐火附近就添柴
+  let down = null;
+  canvas.addEventListener('pointerdown', (e) => {
+    down = { x: e.clientX, y: e.clientY, yaw: camera.dragYaw, pitch: camera.dragPitch, drag: false };
+    canvas.setPointerCapture(e.pointerId);
+    if (panelOpen) setPanel(false);
+  });
+  canvas.addEventListener('pointermove', (e) => {
+    if (!down) return;
+    const dx = e.clientX - down.x;
+    const dy = e.clientY - down.y;
+    if (!down.drag && Math.hypot(dx, dy) > 6) down.drag = true;
+    if (down.drag) {
+      camera.dragYaw = Math.max(-22, Math.min(22, down.yaw - dx * 0.12));
+      camera.dragPitch = Math.max(-10, Math.min(14, down.pitch + dy * 0.08));
+    }
+  });
+  canvas.addEventListener('pointerup', (e) => {
+    if (down && !down.drag) {
+      ensureAudio();
+      const c = project([0, 0.25, 0.15]);
+      const edge = project([0.5, 0.25, 0.0]);
+      if (c && edge && Math.hypot(e.clientX - c[0], e.clientY - c[1]) < Math.abs(edge[0] - c[0]) * 1.1) addLog();
+    }
+    down = null;
+  });
+  canvas.addEventListener('dblclick', resetView);
+
+  // 3 秒沒動就隱藏控制列（設定面板開著時不隱藏）
+  let idleTimer;
+  const wake = () => {
+    document.body.classList.remove('idle');
+    clearTimeout(idleTimer);
+    idleTimer = setTimeout(() => {
+      if (!panelOpen) document.body.classList.add('idle');
+    }, 3000);
+  };
+  addEventListener('pointermove', wake);
+  addEventListener('pointerdown', wake);
+  wake();
+  syncPanel();
+}
+
+// ---- src/js/main.js ----
+// 進入點：載入著色器、初始化渲染與介面，跑主迴圈
+
+
+
+
+
+
+
+
+
+
+const glCanvas = document.getElementById('gl');
+const fxCanvas = document.getElementById('fx');
+const fxCtx = fxCanvas.getContext('2d');
+
+function layout() {
+  view.W = innerWidth;
+  view.H = innerHeight;
+  view.dpr = Math.min(devicePixelRatio || 1, 2);
+  fxCanvas.width = Math.round(view.W * view.dpr);
+  fxCanvas.height = Math.round(view.H * view.dpr);
+  updateCamera(performance.now() / 1000);
+  resizeRenderer();
+}
+
+// 依實際流暢度自動調整渲染比例（下限為該畫質預設值的 60%）
+let slowFrames = 0;
+let fastFrames = 0;
+function adaptResolution(dt) {
+  if (dt > 0.03) {
+    slowFrames++;
+    fastFrames = 0;
+  } else if (dt < 0.018) {
+    fastFrames++;
+    slowFrames = 0;
+  }
+  const base = QUALITY[settings.quality].scale;
+  if (slowFrames > 40 && renderer.scale > base * 0.6) {
+    renderer.scale = Math.max(base * 0.6, renderer.scale - 0.06);
+    slowFrames = 0;
+    resizeRenderer();
+  }
+  if (fastFrames > 240 && renderer.scale < base) {
+    renderer.scale = Math.min(base, renderer.scale + 0.06);
+    fastFrames = 0;
+    resizeRenderer();
+  }
+}
+
+const timeOffset = rnd() * 100;
+let last = performance.now() / 1000;
+let prevCamPos = null;
+
+function frame(now) {
+  const t = now / 1000;
+  const dt = Math.min(0.05, t - last);
+  last = t;
+  adaptResolution(dt);
+
+  updateCamera(t);
+  const p = camera.pos;
+  const camMoved = prevCamPos ? Math.hypot(p[0] - prevCamPos[0], p[1] - prevCamPos[1], p[2] - prevCamPos[2]) : 1;
+  prevCamPos = p.slice();
+
+  const f = updateFire(t, dt, now);
+  audio.fade = f.fade;
+  audio.rain = settings.rain;
+  audio.update(f.intensity, fire.flare, dt);
+
+  renderFrame({
+    time: t + timeOffset,
+    intensity: f.intensity,
+    flare: fire.flare,
+    fuel: f.fuel,
+    newLog: f.newLog,
+    heat: f.heat,
+    camMoved,
+  });
+  updateAndDrawSparks(fxCtx, t, dt);
+  updatePanel(now);
+  requestAnimationFrame(frame);
+}
+
+let resizeRaf;
+addEventListener('resize', () => {
+  cancelAnimationFrame(resizeRaf);
+  resizeRaf = requestAnimationFrame(layout);
+});
+
+initUI(glCanvas, { onQualityChange: resizeRenderer });
+layout();
+requestAnimationFrame(frame);
+loadShaders()
+  .then((shaders) => initRenderer(glCanvas, shaders, layout))
+  .catch((e) => {
+    console.error(e);
+    showMessage('載入著色器失敗（開發時請用本機伺服器開啟，不要直接點兩下 index.html）');
+  });
+})();
+</script>
+  </body>
+</html>
