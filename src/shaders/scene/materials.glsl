@@ -90,6 +90,19 @@ void matInterior(vec3 p, vec3 n, out vec3 A, out vec3 E) {
 }
 void matExt(vec3 p, vec3 n, float m, out vec3 A, out vec3 E, out float G) {
   E = vec3(0.);
+  if (m > 18.5) { // 壁燈燈罩：亞麻布，點亮時從內透光
+    vec3 q = vec3(abs(p.x) - SCONCE.x, p.y - SCONCE.y, p.z - SCONCE.z);
+    float weave = .9 + .1 * mix(.5, noise(vec2(atan(q.z, q.x) * 60., q.y * 300.)), df(300.));
+    A = vec3(.55, .48, .38) * weave;
+    G = .05;
+    E = vec3(1., .58, .27) * LAMP * .26 * weave * (1.25 - .55 * smoothstep(-.07, .07, q.y));
+    return;
+  }
+  if (m > 17.5) { // 壁燈燈座：古銅
+    A = vec3(.12, .08, .045);
+    G = 1.4;
+    return;
+  }
   if (m > 15.5) { // 掛畫
     vec2 q = (p.xy - vec2(0., MY + .36)) / vec2(.34, .21);
     float fr = step(.86, max(abs(q.x), abs(q.y) * 1.08));
@@ -167,7 +180,7 @@ void matExt(vec3 p, vec3 n, float m, out vec3 A, out vec3 E, out float G) {
       G = 2.5;
       return;
     }
-  }              // 鐵柵欄
+  } // 鐵柵欄
   if (m > 9.5) { // 木壁爐台
     vec3 alb = vec3(.2, .1, .05) *
                (.65 + .45 * mix(.5, noise(vec2(p.x * 3., (p.y + p.z) * 160.)), df(160.))) *

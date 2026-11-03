@@ -16,7 +16,7 @@ let resetHistory = true;
 export const renderer = { scale: QUALITY[settings.quality].scale, ready: false };
 
 const UNIFORMS = {
-  scene: ['ZERO', 'R', 'JIT', 'T', 'I', 'FL', 'FT', 'CAM', 'TGT', 'FUEL', 'STEPS', 'MOON', 'SMK', 'NL'],
+  scene: ['ZERO', 'R', 'JIT', 'T', 'I', 'FL', 'FT', 'CAM', 'TGT', 'FUEL', 'STEPS', 'MOON', 'SMK', 'LAMP', 'NL'],
   accumulate: ['S', 'P', 'TX', 'AL'],
   bright: ['S', 'TX', 'TH'],
   blur: ['S', 'DIR'],
@@ -185,7 +185,7 @@ function halton(i, base) {
 
 /**
  * 畫一格。
- * @param {object} f time, intensity, flare, fuel, newLog[4], heat（熱氣扭曲強度）, camMoved（本格鏡頭位移）
+ * @param {object} f time, intensity, flare, fuel, newLog[4], heat（熱氣扭曲強度）, lamp（壁燈亮度 0..1）, camMoved（本格鏡頭位移）
  */
 export function renderFrame(f) {
   if (!gl || !renderer.ready || !targets.scene) return;
@@ -211,6 +211,7 @@ export function renderFrame(f) {
     gl.uniform1f(u.STEPS, QUALITY[settings.quality].steps);
     gl.uniform1f(u.MOON, 1);
     gl.uniform1f(u.SMK, 1);
+    gl.uniform1f(u.LAMP, f.lamp);
     gl.uniform4fv(u.NL, f.newLog);
   });
 

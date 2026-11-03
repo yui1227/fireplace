@@ -31,7 +31,7 @@ void main() {
     if (hm.y < 4.5) {
       matLog(p, hm.y, n, A, E);
       inside = true;
-    } else if (hm.y > 16.5) {
+    } else if (hm.y > 16.5 && hm.y < 17.5) {
       matLog(p, 5., n, A, E);
       inside = true;
     } else if (hm.y < 5.5 && p.z > .004 && abs(p.x) < .505 && p.y < HP + .14) {

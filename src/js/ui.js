@@ -37,6 +37,7 @@ function syncPanel() {
   $('optBurn').checked = settings.burn;
   $('optSway').checked = settings.sway;
   $('optRain').checked = settings.rain;
+  $('optLamp').checked = settings.lamp;
   $('optSleep').value = String(settings.sleep);
   updatePanel(performance.now());
 }
@@ -70,6 +71,10 @@ export function initUI(canvas, { onQualityChange }) {
   };
   $('optSway').onchange = (e) => {
     settings.sway = e.target.checked;
+    saveSettings();
+  };
+  $('optLamp').onchange = (e) => {
+    settings.lamp = e.target.checked;
     saveSettings();
   };
   $('optRain').onchange = (e) => {

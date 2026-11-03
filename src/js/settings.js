@@ -1,4 +1,4 @@
-// 使用者設定（畫質、自然燃燒、鏡頭晃動、雨聲會記在這台瀏覽器；睡眠計時不記）
+// 使用者設定（畫質、自然燃燒、鏡頭晃動、雨聲、壁燈會記在這台瀏覽器；睡眠計時不記）
 
 /** cap：解析度倍率上限（相對 devicePixelRatio）、scale：預設渲染比例、steps：火焰取樣數 */
 export const QUALITY = {
@@ -7,13 +7,13 @@ export const QUALITY = {
   high: { cap: 2, scale: 1, steps: 40 },
 };
 
-export const settings = { quality: 'mid', burn: false, sway: true, rain: false, sleep: 0 };
+export const settings = { quality: 'mid', burn: false, sway: true, rain: false, lamp: true, sleep: 0 };
 
 const STORAGE_KEY = 'fireplace-settings';
 
 try {
   const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}');
-  for (const k of ['quality', 'burn', 'sway', 'rain']) if (k in saved) settings[k] = saved[k];
+  for (const k of ['quality', 'burn', 'sway', 'rain', 'lamp']) if (k in saved) settings[k] = saved[k];
   if (!QUALITY[settings.quality]) settings.quality = 'mid';
 } catch (e) {
   /* 沒有 localStorage 也沒關係 */
@@ -21,8 +21,8 @@ try {
 
 export function saveSettings() {
   try {
-    const { quality, burn, sway, rain } = settings;
-    localStorage.setItem(STORAGE_KEY, JSON.stringify({ quality, burn, sway, rain }));
+    const { quality, burn, sway, rain, lamp } = settings;
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({ quality, burn, sway, rain, lamp }));
   } catch (e) {
     /* 忽略 */
   }

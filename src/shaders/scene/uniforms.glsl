@@ -3,7 +3,7 @@
 out vec4 o;
 uniform int ZERO;
 uniform vec2 R, JIT;
-uniform float T, I, FL, FT, FUEL, STEPS, MOON, SMK;
+uniform float T, I, FL, FT, FUEL, STEPS, MOON, SMK, LAMP;
 uniform vec3 CAM, TGT;
 uniform vec4 NL;
 float gFP = .001;
@@ -14,3 +14,5 @@ float df(float fr) {
 #define SW .74
 #define SH 1.12
 #define SD .34
+// 壁燈位置（x 取正負兩盞）
+const vec3 SCONCE = vec3(1.12, 1.16, .2);

@@ -1,6 +1,7 @@
 // 場景幾何（距離場）
 // 材質編號：0-4 火堆木柴, 5 爐體, 6 金屬框, 7 爐床, 8 地板, 9 磚牆,
-//           10 壁爐台, 11 柵欄, 12 地毯, 14 花瓶, 15 備用柴, 16 掛畫, 17 新添的木柴
+//           10 壁爐台, 11 柵欄, 12 地毯, 14 花瓶, 15 備用柴, 16 掛畫, 17 新添的木柴,
+//           18 壁燈燈座, 19 壁燈燈罩
 float sdBox(vec3 p, vec3 b) {
   vec3 q = abs(p) - b;
   return length(max(q, 0.)) + min(max(q.x, max(q.y, q.z)), 0.);
@@ -97,6 +98,21 @@ vec2 map(vec3 p) {
     float fin = max(length(vec3(bx, y - .27, dr)) - .012, lim * FR);
     float scr = min(min(bars, min(r1, r2)), min(ft, fin)) * .9;
     if (scr < res.x) res = vec2(scr, 11.);
+  }
+  // 壁爐兩側的壁燈（左右對稱）：牆上的底座、伸出的燈臂、圓筒燈罩
+  float lb = sdBox(p - vec3(0., SCONCE.y, SCONCE.z), vec3(SCONCE.x + .2, .2, .16));
+  if (lb < res.x) {
+    vec3 q = vec3(abs(p.x) - SCONCE.x, p.y - SCONCE.y, p.z);
+    float plate = sdBox(q - vec3(0., -.02, SD - .03), vec3(.035, .07, .01)) - .004;
+    float arm =
+        sdBox(q - vec3(0., -.075, (SCONCE.z + SD - .02) * .5), vec3(.008, .008, (SD - .02 - SCONCE.z) * .5));
+    float bracket = min(plate, arm - .002);
+    if (bracket < res.x) res = vec2(bracket, 18.);
+    vec3 sq = q - vec3(0., 0., SCONCE.z);
+    float rr = .075 - .02 * clamp((sq.y + .07) / .14, 0., 1.); // 上窄下寬
+    float rho = length(sq.xz);
+    float shade = max(max(rho - rr, abs(sq.y) - .07), -(rho - rr + .008)) - .002;
+    if (shade < res.x) res = vec2(shade, 19.);
   }
   float rg = sdBox(p - vec3(0., -.087, -.98), vec3(.9, .004, .46)) - .002;
   if (rg < res.x) res = vec2(rg, 12.);

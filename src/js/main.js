@@ -49,6 +49,7 @@ function adaptResolution(dt) {
 }
 
 const timeOffset = rnd() * 100;
+let lampLevel = settings.lamp ? 1 : 0; // 開關壁燈時亮度漸變
 let last = performance.now() / 1000;
 let prevCamPos = null;
 
@@ -68,6 +69,8 @@ function frame(now) {
   audio.rain = settings.rain;
   audio.update(f.intensity, fire.flare, dt);
 
+  lampLevel += ((settings.lamp ? 1 : 0) - lampLevel) * Math.min(1, dt * 5);
+
   renderFrame({
     time: t + timeOffset,
     intensity: f.intensity,
@@ -75,6 +78,7 @@ function frame(now) {
     fuel: f.fuel,
     newLog: f.newLog,
     heat: f.heat,
+    lamp: lampLevel * (0.15 + 0.85 * f.fade), // 睡眠計時淡出時壁燈也跟著調暗
     camMoved,
   });
   updateAndDrawSparks(fxCtx, t, dt);
