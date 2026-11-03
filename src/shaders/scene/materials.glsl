@@ -195,7 +195,7 @@ void matExt(vec3 p, vec3 n, float m, out vec3 A, out vec3 E, out float G) {
     vec3 alb = bricks(p.xy + vec2(.07, 0.), .85);
     {
       A = alb;
-      G = .03;
+      G = .3;
       return;
     }
   }
@@ -241,7 +241,7 @@ void matExt(vec3 p, vec3 n, float m, out vec3 A, out vec3 E, out float G) {
   alb *= 1. - .55 * exp(-dot(sq, sq)) * step(.6, abs(n.z));
   {
     A = alb;
-    G = .05;
+    G = .3;
     return;
   }
 }

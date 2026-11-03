@@ -49,7 +49,10 @@ function adaptResolution(dt) {
 }
 
 const timeOffset = rnd() * 100;
-let lampLevel = settings.lamp ? 1 : 0; // 開關壁燈時亮度漸變
+const HEAD_LAMP_BRIGHTNESS = 0.34;
+// 開關燈時亮度漸變
+let sconceLevel = settings.sconce ? 1 : 0;
+let headLevel = settings.headLamp ? 1 : 0;
 let last = performance.now() / 1000;
 let prevCamPos = null;
 
@@ -69,7 +72,10 @@ function frame(now) {
   audio.rain = settings.rain;
   audio.update(f.intensity, fire.flare, dt);
 
-  lampLevel += ((settings.lamp ? 1 : 0) - lampLevel) * Math.min(1, dt * 5);
+  const ease = Math.min(1, dt * 5);
+  sconceLevel += ((settings.sconce ? 1 : 0) - sconceLevel) * ease;
+  headLevel += ((settings.headLamp ? 1 : 0) - headLevel) * ease;
+  const dim = 0.15 + 0.85 * f.fade; // 睡眠計時淡出時燈也跟著調暗
 
   renderFrame({
     time: t + timeOffset,
@@ -78,7 +84,8 @@ function frame(now) {
     fuel: f.fuel,
     newLog: f.newLog,
     heat: f.heat,
-    lamp: lampLevel * (0.15 + 0.85 * f.fade), // 睡眠計時淡出時壁燈也跟著調暗
+    lamp: sconceLevel * dim,
+    headLamp: headLevel * HEAD_LAMP_BRIGHTNESS * dim,
     camMoved,
   });
   updateAndDrawSparks(fxCtx, t, dt);

@@ -11,6 +11,7 @@ export const camera = {
   target: CAMERA_BASE.target,
   tanHalfFov: 0.4,
   basis: null,
+  headLamp: [0, 2, -3], // 頂燈：鏡頭右後上方，跟著鏡頭移動
   dragYaw: 0,
   dragPitch: 0,
 };
@@ -37,6 +38,8 @@ export function updateCamera(t) {
   const f = vnorm(vsub(tg, camera.pos));
   const r = vnorm(vcross([0, 1, 0], f));
   camera.basis = { f, r, u: vcross(f, r) };
+  const c = camera.pos;
+  camera.headLamp = [c[0] + r[0] * 0.9 - f[0] * 0.7, c[1] + 1.1, c[2] + r[2] * 0.9 - f[2] * 0.7];
 }
 
 /** 場景座標 → 螢幕座標 [x, y, 深度]；在鏡頭後方回傳 null */

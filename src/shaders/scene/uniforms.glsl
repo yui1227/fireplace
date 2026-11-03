@@ -3,7 +3,8 @@
 out vec4 o;
 uniform int ZERO;
 uniform vec2 R, JIT;
-uniform float T, I, FL, FT, FUEL, STEPS, MOON, SMK, LAMP;
+uniform float T, I, FL, FT, FUEL, STEPS, MOON, SMK, LAMP, HEADI;
+uniform vec3 HEAD; // 頂燈位置（跟著鏡頭）
 uniform vec3 CAM, TGT;
 uniform vec4 NL;
 float gFP = .001;
